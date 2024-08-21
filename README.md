@@ -43,4 +43,3 @@ Here is a list of scripts included in this repository and their purpose:
 4. `functions.ps1`: This script contains helper functions used by the other scripts. It is sourced by the other scripts to provide common functionality.
 
 These scripts are designed to automate the setup process and ensure consistency across different machines. By running these scripts, you can easily configure your development environment without the need for manual installation and configuration.
-
