@@ -20,20 +20,89 @@ function Test-Administrator
     }
 }
 
-# VARIABLES
-$VARS=@{
-	PYTHON_HOME = "C:\data\apps\#dev\python\3.10.6";
-	GIT_HOME = "C:\data\apps\#dev\git";
-	M2_HOME = "C:\data\apps\#dev\apache-maven\3.8.6";
-	JAVA_HOME = "C:\data\apps\#dev\jdk\jdk-11.0.15.1";
-	SUBLIME_HOME = "C:\data\apps\#dev\sublime";
-	INTELLIJ_HOME = "C:\data\apps\#dev\intellijc\2022.2";
-	VSCODE_HOME = "C:\data\apps\#dev\vscode";
-	ZIP_HOME = "C:\data\apps\#dev\7-Zip";
-	DIVE_HOME = "C:\data\apps\#dev\dive";
-	GOROOT = "C:\data\apps\#dev\go";
+# Read .env file
+$ENV_DESTINATION_SCOPE="script" # local, user, machine, process
+Get-Content .env | ForEach-Object {
+	# if line is empty or starts with #, skip it
+	$line = $_.Trim()
+	if ([string]::IsNullOrWhiteSpace($line) -or $line -match '^\s*#') {
+		# skip comments and empty lines
+		return
+	}
+
+	$name, $value = $_.split('=')
+
+	if ([string]::IsNullOrWhiteSpace($name) -or $name.Trim() -match '^\s*#') {
+		return
+	}
+	
+	# remove comments from value
+	# find index of fist # in value but not if its surrounded by double quotes
+	$matches = [regex]::Matches($value, '(?<!")#(?!")')
+
+	# Filter out matches that are actually within double quotes
+	$filteredMatches = $matches | Where-Object {
+		$beforeMatch = $value.Substring(0, $_.Index)
+		$afterMatch = $value.Substring($_.Index + 1)
+		
+		# Ensure the match is not within double quotes
+		($beforeMatch -split '"').Count % 2 -eq 1 -and ($afterMatch -split '"').Count % 2 -eq 1
+	}
+
+	# If matches are found, get the first match index
+	if ($filteredMatches.Count -gt 0) {
+		$firstMatch = $filteredMatches[0]
+		$firstIndex = $firstMatch.Index
+		$value = $value.Substring(0, $firstIndex)
+	}
+
+	# trim and remove double quotes from value
+	$value = $value.Trim().Trim('"')
+	
+	if($ENV_DESTINATION_SCOPE -eq "machine")
+	{
+		if (Test-Administrator == $False) {
+			Write-Error "Please run script as administrator to set environment variables for machine."
+			exit 1
+		}
+	}
+
+	# choose where to store the environment variable
+	switch ($ENV_DESTINATION) {
+		"process" {
+			[Environment]::SetEnvironmentVariable($name, $value, 0) # 0 = [System.EnvironmentVariableTarget]::Process
+		}
+		"user" {
+			[Environment]::SetEnvironmentVariable($name, $value, 1) # 1 = [System.EnvironmentVariableTarget]::User
+		}
+		"machine" {
+			[Environment]::SetEnvironmentVariable($name, $value, 2) # 2 = [System.EnvironmentVariableTarget]::Machine
+		}
+		# default to script
+		default {
+			Set-Variable -Name $name -Value $value
+		}
+	}
 }
 
+function Convert-Path($path) {
+	$path = $path -replace '\\', '\/'
+	return $path
+}
+
+# VARIABLES
+$VARS=@{
+	PYTHON_HOME = "$DEV_APPS_PATH\python\3.10.6";
+	GIT_HOME = "$DEV_APPS_PATH\git";
+	M2_HOME = "$DEV_APPS_PATH\apache-maven\3.8.6";
+	JAVA_HOME = "$DEV_APPS_PATH\jdk\jdk-11.0.15.1";
+	SUBLIME_HOME = "$DEV_APPS_PATH\sublime";
+	INTELLIJ_HOME = "$DEV_APPS_PATH\intellijc\2022.2";
+	VSCODE_HOME = "$DEV_APPS_PATH\vscode";
+	ZIP_HOME = "$DEV_APPS_PATH\7-Zip";
+	DIVE_HOME = "$DEV_APPS_PATH\dive";
+	GOROOT = "$DEV_APPS_PATH\go";
+}
 
 $PATH=[System.Environment]::GetEnvironmentVariable("PATH", [System.EnvironmentVariableTarget]::Machine)
 Write-Output "---------------------------"
@@ -78,7 +147,6 @@ $SETUP_EXEC = @{
 	"install Element Gitter" = "winget install Element.Element --source winget --silent --accept-package-agreements --accept-source-agreements";
 
 	"install nvm" = "winget install CoreyButler.NVMforWindows --source winget --silent --accept-package-agreements --accept-source-agreements";
-	#"install nvm" = "C:\data\apps\#dev\_install\nvm-setup.exe";
 
 	"install visual studio 2022" = "winget install XPDCFJDKLZJLP8 --source msstore --silent --accept-package-agreements --accept-source-agreements";
 	
@@ -103,12 +171,13 @@ $SETUP_EXEC = @{
 	"install wsl2" = "dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart";
 	"set wsl2" = "wsl --set-default-version 2";	
 
-	"setup git" = "git config --global core.autocrlf false; git config --global core.eol lf; git config --global core.longpaths true; git config --global credential.helper !""C:/Data/apps/#dev/git/mingw64/bin/git-credential-manager-core.exe""; git config --global gpg.program ""C:/Data/apps/#dev/git/usr/bin/gpg.exe""; git config --global gpg.program ""C:/Data/apps/#dev/git/usr/bin/gpg.exe"";  git config --global credential.helperselector.selected manager-core;   ";	
-	"setup gpg" = "gpg --import ./_secret/maxbarrass-gpg; gpg --list-secret-keys --keyid-format LONG";	
-	"setup git creds" = "git config --global user.name wildone; git config --global user.email max.barrass@gmail.com; git config --global user.signingkey 4AB36884B8575217; git config --global commit.gpgsign true";	
+	"setup git config" = "git config --global core.autocrlf false; git config --global core.eol lf; git config --global core.longpaths true;  ";	
+	"setup git helper credentials" = "git config --global credential.helper !""$(Convert-Path("$DEV_APPS_PATH/git-credential-manager/git-credential-manager.exe"))""; git config --global credential.helperselector.selected manager;  ";	
+	"setup git helper gpg " = "git config --global gpg.program ""$(Convert-Path("$DEV_APPS_PATH/git/usr/bin/gpg.exe"))""; git config --global gpg.program ""$(Convert-Path("$DEV_APPS_PATH/git/usr/bin/gpg.exe"))"";  ";	
+	"setup gpg" = "gpg --import $GPG_KEY; gpg --list-secret-keys --keyid-format LONG";	
+	"setup git creds" = "git config --global user.name $GIT_USERNAME; git config --global user.email $GIT_EMAIL; git config --global user.signingkey $GIT_SIGNINGKEY; git config --global commit.gpgsign true";	
 	
 }
-
 
 if(Test-Administrator)
 {
@@ -120,6 +189,7 @@ if(Test-Administrator)
 		Write-Output "$_ = $($SETUP_EXEC[$_])"
 		Write-Output "****************************************"
 		Invoke-Expression -Command $($SETUP_EXEC[$_])
+		# Write-Debug "Invoke-Expression -Command $($SETUP_EXEC[$_])"
 		Write-Output "****************************************"
 	}
 
