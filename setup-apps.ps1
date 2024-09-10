@@ -56,7 +56,9 @@ $SETUP_EXEC = @{
 	"install Company Portal" = "winget install 9WZDNCRFJ3PZ --source msstore --silent --accept-package-agreements --accept-source-agreements";
 
 	"install PHP XAMPP" = "winget install -e --id ApacheFriends.Xampp.8.2";
-	
+
+	"install Windows Subsystem for Android" = "winget install 9P3395VX91NR --source msstore --silent --accept-package-agreements --accept-source-agreements";
+
 
 	#"install wsl2" = "C:\data\apps\#dev\_install\wsl_update_x64.msi";
 	"install wsl" = "wsl --install";
