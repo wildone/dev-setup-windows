@@ -62,6 +62,8 @@ $SETUP_EXEC = @{
   	"install Powershell 7" = "winget install --id Microsoft.PowerShell  --silent --accept-package-agreements --accept-source-agreements";
    	"install Git For Windows" = "winget install --id Microsoft.Git  --silent --accept-package-agreements --accept-source-agreements";
 
+    	"install Kubernetes.kompose" = "winget install --id Kubernetes.kompose  --silent --accept-package-agreements --accept-source-agreements";
+
 	#"install wsl2" = "C:\data\apps\#dev\_install\wsl_update_x64.msi";
 	"install wsl" = "wsl --install";
 	"install wsl2" = "dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart";
