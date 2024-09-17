@@ -63,6 +63,8 @@ $SETUP_EXEC = @{
    	"install Git For Windows" = "winget install --id Microsoft.Git  --silent --accept-package-agreements --accept-source-agreements";
 
     	"install Kubernetes.kompose" = "winget install --id Kubernetes.kompose  --silent --accept-package-agreements --accept-source-agreements";
+     	
+      	"install Visual Studio VSCode" = "winget install --id Microsoft.VisualStudioCode  --silent --accept-package-agreements --accept-source-agreements";
 
 	#"install wsl2" = "C:\data\apps\#dev\_install\wsl_update_x64.msi";
 	"install wsl" = "wsl --install";
