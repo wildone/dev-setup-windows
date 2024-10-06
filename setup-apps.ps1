@@ -66,6 +66,10 @@ $SETUP_EXEC = @{
      	
       	"install Visual Studio VSCode" = "winget install --id Microsoft.VisualStudioCode  --silent --accept-package-agreements --accept-source-agreements";
 
+       "install mitmproxy" = "winget install --id=mitmproxy.mitmproxy  -e";
+
+       
+
 	#"install wsl2" = "C:\data\apps\#dev\_install\wsl_update_x64.msi";
 	"install wsl" = "wsl --install";
 	"install wsl2" = "dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart";
