@@ -68,6 +68,10 @@ $SETUP_EXEC = @{
 
        "install mitmproxy" = "winget install --id=mitmproxy.mitmproxy  -e";
 
+       "install jq" = "winget install --id=jqlang.jq  -e";
+
+       
+
        
 
 	#"install wsl2" = "C:\data\apps\#dev\_install\wsl_update_x64.msi";
