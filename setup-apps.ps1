@@ -55,26 +55,34 @@ $SETUP_EXEC = @{
 
 	"install Company Portal" = "winget install 9WZDNCRFJ3PZ --source msstore --silent --accept-package-agreements --accept-source-agreements";
 
-	"install PHP XAMPP" = "winget install -e --id ApacheFriends.Xampp.8.2";
+	"install PHP XAMPP" = "winget install ApacheFriends.Xampp.8.2 --silent --accept-package-agreements --accept-source-agreements";
 
 	"install Windows Subsystem for Android" = "winget install 9P3395VX91NR --source msstore --silent --accept-package-agreements --accept-source-agreements";
  	
-  	"install Powershell 7" = "winget install --id Microsoft.PowerShell  --silent --accept-package-agreements --accept-source-agreements";
-   	"install Git For Windows" = "winget install --id Microsoft.Git  --silent --accept-package-agreements --accept-source-agreements";
+  	"install Powershell 7" = "winget install Microsoft.PowerShell  --silent --accept-package-agreements --accept-source-agreements";
+   	"install Git For Windows" = "winget install Microsoft.Git  --silent --accept-package-agreements --accept-source-agreements";
 
-    	"install Kubernetes.kompose" = "winget install --id Kubernetes.kompose  --silent --accept-package-agreements --accept-source-agreements";
-        "install Kubernetes.kubectl" = "winget install --id=Kubernetes.kubectl  -e";
+    	"install Kubernetes.kompose" = "winget install Kubernetes.kompose  --silent --accept-package-agreements --accept-source-agreements";
+        "install Kubernetes.kubectl" = "winget install Kubernetes.kubectl --silent --accept-package-agreements --accept-source-agreements";
           	
-      	"install Visual Studio VSCode" = "winget install --id Microsoft.VisualStudioCode  --silent --accept-package-agreements --accept-source-agreements";
+      	"install Visual Studio VSCode" = "winget install Microsoft.VisualStudioCode  --silent --accept-package-agreements --accept-source-agreements";
 
-       "install mitmproxy" = "winget install --id=mitmproxy.mitmproxy  -e";
+       "install mitmproxy" = "winget install mitmproxy.mitmproxy --silent --accept-package-agreements --accept-source-agreements";
 
-       "install jq" = "winget install --id=jqlang.jq  -e";
+        "install jq" = "winget install jqlang.jq --silent --accept-package-agreements --accept-source-agreements";
 
-	"install minikube" = "winget install --id=Kubernetes.minikube  -e";
+	"install minikube" = "winget install Kubernetes.minikube --silent --accept-package-agreements --accept-source-agreements";
 
-	"install podman" = "winget install --id=RedHat.Podman  -e";
-	"install podman desktop" = "winget install --id=RedHat.Podman-Desktop  -e";
+	"install podman" = "winget install RedHat.Podman --silent --accept-package-agreements --accept-source-agreements";
+	"install podman desktop" = "winget install RedHat.Podman-Desktop --silent --accept-package-agreements --accept-source-agreements";
+
+	"install sublime" = "winget install SublimeHQ.SublimeText.4 --silent --accept-package-agreements --accept-source-agreements";
+	"install python 3" = "winget install Python.Python.3.10 --silent --accept-package-agreements --accept-source-agreements";
+	"install intellij community" = "winget install JetBrains.IntelliJIDEA.Community --silent --accept-package-agreements --accept-source-agreements";
+	
+	"install jdk 8" = "winget install Oracle.JavaRuntimeEnvironment --silent --accept-package-agreements --accept-source-agreements";
+	"install jdk 11" = "winget install ojdkbuild.openjdk.11.jdk --silent --accept-package-agreements --accept-source-agreements";
+	"install jdk 17" = "winget install Oracle.JDK.17 --silent --accept-package-agreements --accept-source-agreements";
 
 	#"install wsl2" = "C:\data\apps\#dev\_install\wsl_update_x64.msi";
 	"install wsl" = "wsl --install";
