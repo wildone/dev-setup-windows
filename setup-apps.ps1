@@ -56,7 +56,8 @@ $SETUP_EXEC = @{
 #	"install Element Gitter" = "winget install Element.Element --source winget --silent --accept-package-agreements --accept-source-agreements";
 
 	"install nvm" = "winget install CoreyButler.NVMforWindows --source winget --silent --accept-package-agreements --accept-source-agreements";
-
+	"install GnuWin32.Zip" = "winget install GnuWin32.Zip --silent --accept-package-agreements --accept-source-agreements";
+	
 #	"install visual studio 2022" = "winget install XPDCFJDKLZJLP8 --source msstore --silent --accept-package-agreements --accept-source-agreements";
 	
 	"install Nvidia.GeForceExperience" = "winget install Nvidia.GeForceNow --source winget --silent --accept-package-agreements --accept-source-agreements";
@@ -80,7 +81,7 @@ $SETUP_EXEC = @{
 #    	"install Kubernetes.kompose" = "winget install Kubernetes.kompose  --silent --accept-package-agreements --accept-source-agreements";
 #        "install Kubernetes.kubectl" = "winget install Kubernetes.kubectl --silent --accept-package-agreements --accept-source-agreements";
           	
-      	"install Visual Studio VSCode" = "winget install Microsoft.VisualStudioCode  --silent --accept-package-agreements --accept-source-agreements";
+	"install Visual Studio VSCode" = "winget install Microsoft.VisualStudioCode  --silent --accept-package-agreements --accept-source-agreements";
 
 #       "install mitmproxy" = "winget install mitmproxy.mitmproxy --silent --accept-package-agreements --accept-source-agreements";
 
