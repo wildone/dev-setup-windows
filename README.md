@@ -29,9 +29,10 @@ To get started:
 3. update the `.env` file
     - update path to files, if needed
     - update your git into
-4. run `setup-apps.ps1` to install all the apps
-5. run `setup-env.ps1` to configure environment variables and file associations
-6. IF needed, run `setup-env-admin.ps1` to update registry settings
+4. run `setup-env-admin.ps1` (admin) to update machine-level settings that require elevation
+5. run `setup-env.ps1` (admin) to apply environment updates while elevated
+6. run `setup-env.ps1` (normal user) to apply user-level environment variables and PATH
+7. run `setup-apps.ps1` (normal user) to install all the apps
 
 ## Scripts
 

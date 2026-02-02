@@ -11,9 +11,10 @@ $SETUP_EXEC = @{
 	"wsl install" = "wsl --install";
 	"enable remote desktop" = "Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name ""fDenyTSConnections"" -value 0";
 	"enable remote desktop firewall" = "Enable-NetFirewallRule -DisplayGroup ""Remote Desktop""";
-	"enable network discovery" = "netsh advfirewall firewall set rule group=""Network Discovery"" new enable=Yes"
-	"enabled windows long filenames filesystem" = "reg add ""HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\FileSystem"" /v LongPathsEnabled /t REG_DWORD /d 0x1 /f"
-	"enabled windows long filenames policy" = "reg add ""HKEY_LOCAL_MACHINE\System\CurrentControlSet\Policies"" /v LongPathsEnabled /t REG_DWORD /d 0x1 /f"
+	"enable network discovery" = "netsh advfirewall firewall set rule group=""Network Discovery"" new enable=Yes";
+	"enabled windows long filenames filesystem" = "reg add ""HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\FileSystem"" /v LongPathsEnabled /t REG_DWORD /d 0x1 /f";
+	"enabled windows long filenames policy" = "reg add ""HKEY_LOCAL_MACHINE\System\CurrentControlSet\Policies"" /v LongPathsEnabled /t REG_DWORD /d 0x1 /f";
+	"enabled developer mode" = "reg add ""HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock"" /t REG_DWORD /f /v ""AllowDevelopmentWithoutDevLicense"" /d ""1"" ";
 }
 
 if(Test-Administrator)

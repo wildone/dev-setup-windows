@@ -1,7 +1,7 @@
 */*
 *.lnk
 WebCrawler/
-_secret/
+.secret/
 _install/
 **/site-packages/
 **/__pycache__/
