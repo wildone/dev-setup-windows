@@ -30,6 +30,10 @@ $SETUP_EXEC = @{
 	"install office" = "winget install 9WZDNCRD29V9 --source msstore --silent --accept-package-agreements --accept-source-agreements";
 	"install teams" = "winget install XP8BT8DW290MPQ --source msstore --silent --accept-package-agreements --accept-source-agreements";
 
+	"install Foxit.FoxitReader" = "winget install Foxit.FoxitReader --silent --accept-package-agreements --accept-source-agreements";
+	
+
+
 	"install gpg" = "winget install GnuPG.Gpg4win --source msstore --silent --accept-package-agreements --accept-source-agreements";
 
 	"install 1password" = "winget install AgileBits.1Password --silent --accept-package-agreements --accept-source-agreements";
