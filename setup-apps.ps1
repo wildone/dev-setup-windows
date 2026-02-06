@@ -31,8 +31,8 @@ $SETUP_EXEC = @{
 	"install teams" = "winget install XP8BT8DW290MPQ --source msstore --silent --accept-package-agreements --accept-source-agreements";
 
 	"install Foxit.FoxitReader" = "winget install Foxit.FoxitReader --silent --accept-package-agreements --accept-source-agreements";
-	
 
+	"install Foxit.WiFimanDesktop" = "winget install UbiquitiInc.WiFimanDesktop  --silent --accept-package-agreements --accept-source-agreements";
 
 	"install gpg" = "winget install GnuPG.Gpg4win --source msstore --silent --accept-package-agreements --accept-source-agreements";
 
