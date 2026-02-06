@@ -20,6 +20,15 @@ I have fixed path where I install all my dev apps and its configured in the `.en
 6. **WSL only Docker** - If you cant use Docker Desktop, then use WSL2 with Docker, nothing else.
 7. **No Bash** - I have written so many bash scripts, but I am done with it. Moved to Powershell and not looking back, core version runs on all platforms anyways, so I keep my scripts simple.
 
+## Quick Start
+
+On a clean machine you will need these first:
+
+```
+winget install Microsoft.PowerShell  --silent --accept-package-agreements --accept-source-agreements
+winget install Microsoft.Git  --silent --accept-package-agreements --accept-source-agreements
+```
+
 ## Usage
 
 To get started:
