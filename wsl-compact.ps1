@@ -11,13 +11,12 @@ Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host "     WSL DISK CLEANUP & COMPACT SCRIPT     " -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
 
-# 1. Fetch installed WSL distributions and thoroughly sanitise the UTF-16 text strings
+# 1. Fetch installed WSL distributions and thoroughly sanitise text strings
 Write-Verbose "Querying WSL for installed distributions..." -Verbose
 $wslOutput = wsl --list --quiet
 $wslDistros = @()
 
 foreach ($line in $wslOutput) {
-    # Strip null characters, carriage returns, and whitespace caused by encoding mismatches
     $cleanLine = $line.Replace("`0", "").Trim()
     if (-not [string]::IsNullOrWhiteSpace($cleanLine)) {
         $wslDistros += $cleanLine
@@ -63,7 +62,10 @@ if (-not $distroGuid) {
     Exit
 }
 
-$vhdxPath = (Get-ItemProperty $distroGuid.PsPath).BasePath + "\ext4.vhdx"
+$rawBasePath = (Get-ItemProperty $distroGuid.PsPath).BasePath
+# Strip Win32 namespace prefix device paths (like \\?\) that break PowerShell's Test-Path
+$cleanBasePath = $rawBasePath -replace '^\\\\\?\\', ''
+$vhdxPath = Join-Path $cleanBasePath "ext4.vhdx"
 $vhdxPath = [System.Environment]::ExpandEnvironmentVariables($vhdxPath)
 
 if (-not (Test-Path $vhdxPath)) {
@@ -83,19 +85,22 @@ wsl -d $targetDistro --user root fstrim -av
 # 5. Safely shutdown WSL
 Write-Host "`nStep 2: Shutting down all WSL instances to unlock the VHDX file..." -ForegroundColor Cyan
 wsl --shutdown
-Start-Sleep -Seconds 3
+Start-Sleep -Seconds 5
 
-# 6. Compact the VHDX using Hyper-V tools or Diskpart
-Write-Host "`nStep 3: Compacting the virtual hard disk file..." -ForegroundColor Cyan
+# 6. Deactivate sparse mode temporarily to allow external compaction tools to attach
+Write-Host "`nStep 3: Preparing disk flags for compaction..." -ForegroundColor Cyan
+wsl --manage $targetDistro --set-sparse false
+
+# 7. Compact the VHDX using Hyper-V tools or Diskpart fallback
+Write-Host "`nStep 4: Compacting the virtual hard disk file..." -ForegroundColor Cyan
 Write-Verbose "Executing Optimize-VHD on $vhdxPath..." -Verbose
 
 try {
     Optimize-VHD -Path $vhdxPath -Mode Full -ErrorAction Stop
 } catch {
-    Write-Host "Optimize-VHD cmdlet failed or Hyper-V module is missing." -ForegroundColor Yellow
-    Write-Host "Attempting alternative compression using Diskpart..." -ForegroundColor Yellow
+    Write-Host "Note: Optimize-VHD cmdlet unavailable. Compacting using Windows Diskpart tool..." -ForegroundColor Yellow
     
-    # Create temporary diskpart script block
+    # Generate temporary diskpart script block
     $diskpartScript = @"
 select vdisk file="$vhdxPath"
 attach vdisk readonly
@@ -106,11 +111,11 @@ exit
     $diskpartScript | diskpart
 }
 
-# 7. Enable modern sparse mode for automatic future cleanup
-Write-Host "`nStep 4: Ensuring sparse mode is enabled for automatic future shrinkage..." -ForegroundColor Cyan
+# 8. Re-enable sparse mode for automatic future space reclamation
+Write-Host "`nStep 5: Enforcing sparse mode for automatic future shrinkage..." -ForegroundColor Cyan
 wsl --manage $targetDistro --set-sparse true
 
-# 8. Report savings
+# 9. Report real structural savings
 $finalSize = (Get-Item $vhdxPath).Length / 1GB
 $spaceSaved = $initialSize - $finalSize
 
