@@ -14,38 +14,69 @@ Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host " UNIVERSAL WSL & DOCKER MASTER CLEANUP " -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
 
-# 2. DYNAMIC DEEP-SCAN (FIXED SYNTAX)
-Write-Host "`nScanning system registry and base folders for all VHDX files..." -ForegroundColor Yellow
+# 2. DYNAMIC DEEP-SCAN (REGISTRY + PHYSICAL APPDATA SCAN)
+Write-Host "`nScanning registry and filesystem for all virtual disks..." -ForegroundColor Yellow
 $targetList = @()
-$wslRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss"
+$scannedPaths = @()
 
+# Helper function to add unique files to our menu
+function Add-VhdxTarget {
+    param([string]$DistroName, [string]$FilePath, [string]$Source)
+    $fullPath = [System.IO.Path]::GetFullPath($FilePath)
+    
+    # Prevent duplicate listings
+    if ($scannedPaths -contains $fullPath) { return }
+    if (-not (Test-Path $fullPath)) { return }
+    
+    $scannedPaths += $fullPath
+    $fileInfo = Get-Item $fullPath
+    $sizeGB = [math]::Round($fileInfo.Length / 1GB, 2)
+    
+    # Create a descriptive label based on the folder path
+    $parentDir = Split-Path (Split-Path $fullPath -Parent) -Leaf
+    $fileName = Split-Path $fullPath -Leaf
+    $cleanLabel = "$DistroName [$parentDir\$fileName]"
+    
+    Write-Host " Found: [$($targetList.Count)] $cleanLabel ($sizeGB GB)"
+    
+    $script:targetList += [PSCustomObject]@{ 
+        Name  = $DistroName; 
+        Label = $cleanLabel; 
+        Path  = $fullPath; 
+        Size  = $sizeGB 
+    }
+}
+
+# Method A: Scan Registry base paths
+$wslRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss"
 if (Test-Path $wslRegPath) {
     $distroKeys = Get-ChildItem $wslRegPath
     foreach ($key in $distroKeys) {
         $props = Get-ItemProperty $key.PsPath
         $distroName = $props.DistributionName.Replace("`0", "").Trim()
-        $rawBasePath = $props.BasePath -replace '^\\\\\?\\', ''
+        $rawPath = $props.BasePath -replace '^\\\\\?\\', ''
         
-        if (Test-Path $rawBasePath) {
-            # CORRECTION: Changed -Recurrusive to -Recurse
-            $foundVhdxFiles = Get-ChildItem -Path $rawBasePath -Filter "*.vhdx" -Recurse -File -ErrorAction SilentlyContinue
-            
-            foreach ($file in $foundVhdxFiles) {
-                $sizeGB = [math]::Round($file.Length / 1GB, 2)
-                
-                # Make the menu readable by showing the subfolder layout cleanly
-                $relativeLabel = $file.FullName.Replace($rawBasePath, "").TrimStart("\")
-                $cleanLabel = "$distroName [$relativeLabel]"
-                
-                Write-Host " Found: [$($targetList.Count)] $cleanLabel ($sizeGB GB)"
-                
-                $targetList += [PSCustomObject]@{ 
-                    Name  = $distroName; 
-                    Label = $cleanLabel; 
-                    Path  = $file.FullName; 
-                    Size  = $sizeGB 
-                }
+        if (Test-Path $rawPath) {
+            $foundFiles = Get-ChildItem -Path $rawPath -Filter "*.vhdx" -Recurse -File -ErrorAction SilentlyContinue
+            foreach ($file in $foundFiles) {
+                Add-VhdxTarget -DistroName $distroName -FilePath $file.FullName -Source "Registry"
             }
+        }
+    }
+}
+
+# Method B: Scan standard default Local AppData folders to catch orphaned/unregistered Docker disks
+$localAppData = [System.Environment]::GetFolderPath("LocalApplicationData")
+$defaultPaths = @(
+    @{ Path = Join-Path $localAppData "Docker\wsl"; Name = "docker-desktop-data" }
+    @{ Path = Join-Path $localAppData "Packages\CanonicalGroupLimited"; Name = "Ubuntu" }
+)
+
+foreach ($dp in $defaultPaths) {
+    if (Test-Path $dp.Path) {
+        $foundFiles = Get-ChildItem -Path $dp.Path -Filter "*.vhdx" -Recurse -File -ErrorAction SilentlyContinue
+        foreach ($file in $foundFiles) {
+            Add-VhdxTarget -DistroName $dp.Name -FilePath $file.FullName -Source "Filesystem Scan"
         }
     }
 }
