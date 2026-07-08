@@ -14,7 +14,7 @@ Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host " UNIVERSAL WSL & DOCKER MASTER CLEANUP " -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
 
-# 2. DYNAMIC DEEP-SCAN (NO HARDCODED SUBPATHS)
+# 2. DYNAMIC DEEP-SCAN (FIXED SYNTAX)
 Write-Host "`nScanning system registry and base folders for all VHDX files..." -ForegroundColor Yellow
 $targetList = @()
 $wslRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss"
@@ -27,8 +27,8 @@ if (Test-Path $wslRegPath) {
         $rawBasePath = $props.BasePath -replace '^\\\\\?\\', ''
         
         if (Test-Path $rawBasePath) {
-            # Find EVERY .vhdx file recursively inside this distribution's storage folder
-            $foundVhdxFiles = Get-ChildItem -Path $rawBasePath -Filter "*.vhdx" -Recurrusive -File -ErrorAction SilentlyContinue
+            # CORRECTION: Changed -Recurrusive to -Recurse
+            $foundVhdxFiles = Get-ChildItem -Path $rawBasePath -Filter "*.vhdx" -Recurse -File -ErrorAction SilentlyContinue
             
             foreach ($file in $foundVhdxFiles) {
                 $sizeGB = [math]::Round($file.Length / 1GB, 2)
