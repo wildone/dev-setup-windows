@@ -1,4 +1,9 @@
 # Requires -RunAsAdministrator
+[CmdletBinding()]
+param (
+    [Parameter(Mandatory = $false)]
+    [int]$TargetIndex = -1
+)
 
 # 1. ENFORCE ADMIN PRIVILEGES
 $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -19,12 +24,10 @@ Write-Host "`nScanning registry and filesystem for all virtual disks..." -Foregr
 $targetList = @()
 $scannedPaths = @()
 
-# Helper function to add unique files to our menu
 function Add-VhdxTarget {
-    param([string]$DistroName, [string]$FilePath, [string]$Source)
+    param([string]$DistroName, [string]$FilePath)
     $fullPath = [System.IO.Path]::GetFullPath($FilePath)
     
-    # Prevent duplicate listings
     if ($scannedPaths -contains $fullPath) { return }
     if (-not (Test-Path $fullPath)) { return }
     
@@ -32,7 +35,6 @@ function Add-VhdxTarget {
     $fileInfo = Get-Item $fullPath
     $sizeGB = [math]::Round($fileInfo.Length / 1GB, 2)
     
-    # Create a descriptive label based on the folder path
     $parentDir = Split-Path (Split-Path $fullPath -Parent) -Leaf
     $fileName = Split-Path $fullPath -Leaf
     $cleanLabel = "$DistroName [$parentDir\$fileName]"
@@ -47,7 +49,7 @@ function Add-VhdxTarget {
     }
 }
 
-# Method A: Scan Registry base paths
+# Scan Registry
 $wslRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss"
 if (Test-Path $wslRegPath) {
     $distroKeys = Get-ChildItem $wslRegPath
@@ -59,13 +61,13 @@ if (Test-Path $wslRegPath) {
         if (Test-Path $rawPath) {
             $foundFiles = Get-ChildItem -Path $rawPath -Filter "*.vhdx" -Recurse -File -ErrorAction SilentlyContinue
             foreach ($file in $foundFiles) {
-                Add-VhdxTarget -DistroName $distroName -FilePath $file.FullName -Source "Registry"
+                Add-VhdxTarget -DistroName $distroName -FilePath $file.FullName
             }
         }
     }
 }
 
-# Method B: Scan standard default Local AppData folders to catch orphaned/unregistered Docker disks
+# Scan Physical Filesystem
 $localAppData = [System.Environment]::GetFolderPath("LocalApplicationData")
 $defaultPaths = @(
     @{ Path = Join-Path $localAppData "Docker\wsl"; Name = "docker-desktop-data" }
@@ -76,7 +78,7 @@ foreach ($dp in $defaultPaths) {
     if (Test-Path $dp.Path) {
         $foundFiles = Get-ChildItem -Path $dp.Path -Filter "*.vhdx" -Recurse -File -ErrorAction SilentlyContinue
         foreach ($file in $foundFiles) {
-            Add-VhdxTarget -DistroName $dp.Name -FilePath $file.FullName -Source "Filesystem Scan"
+            Add-VhdxTarget -DistroName $dp.Name -FilePath $file.FullName
         }
     }
 }
@@ -86,12 +88,18 @@ if ($targetList.Count -eq 0) {
     Exit
 }
 
-# 3. SELECT TARGET VIA THE DYNAMICALLY GENERATED LIST
-$choice = -1
-while ($choice -lt 0 -or $choice -ge $targetList.Count) {
-    $input = Read-Host "`nSelect the number of the distribution file to clean and compact"
-    if (![int]::TryParse($input, [ref]$choice) -or $choice -lt 0 -or $choice -ge $targetList.Count) {
-        Write-Host "Invalid choice. Please pick a number from the list above." -ForegroundColor Red
+# 3. HANDLE AUTOMATED SELECTION VS INTERACTIVE CHOICE
+$choice = $TargetIndex
+
+if ($choice -ge 0 -and $choice -lt $targetList.Count) {
+    Write-Host "`n[Auto-Selection Active] Automatically targeting index: $choice" -ForegroundColor Cyan
+} else {
+    $choice = -1
+    while ($choice -lt 0 -or $choice -ge $targetList.Count) {
+        $input = Read-Host "`nSelect the number of the distribution file to clean and compact"
+        if (![int]::TryParse($input, [ref]$choice) -or $choice -lt 0 -or $choice -ge $targetList.Count) {
+            Write-Host "Invalid choice. Please pick a number from the list above." -ForegroundColor Red
+        }
     }
 }
 
@@ -122,7 +130,6 @@ Start-Sleep -Seconds 5
 
 # 6. COMPACTION AND AUTO-MANAGEMENT
 Write-Host "`nStep 3: Compacting storage and ensuring Sparse mode is active..." -ForegroundColor Cyan
-# Uses --allow-unsafe to bypass modern Windows corruption warnings for sparse mode
 wsl --manage $selected.Name --set-sparse true --allow-unsafe 2>$null
 
 try {
