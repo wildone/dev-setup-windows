@@ -42,6 +42,7 @@ $wslRoot = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "wsl
 $targetRoots = @($dockerRoot, $wslRoot)
 $script:DockerExe = $null
 $script:HadFailures = $false
+$script:HadWarnings = $false
 
 function Write-Step {
     param([string]$Message)
@@ -101,6 +102,66 @@ function Find-DockerExecutable {
     }
 
     return $null
+}
+
+function Invoke-DockerCommandWithTimeout {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [int]$TimeoutSeconds = 30
+    )
+
+    if ($null -eq $script:DockerExe) {
+        throw "Docker CLI is unavailable."
+    }
+
+    $id = [guid]::NewGuid().ToString("N")
+    $stdoutPath = Join-Path $env:TEMP "wsl-compact-docker-$id.out"
+    $stderrPath = Join-Path $env:TEMP "wsl-compact-docker-$id.err"
+    $process = $null
+
+    try {
+        $process = Start-Process -FilePath $script:DockerExe -ArgumentList $Arguments -PassThru `
+            -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            $process.WaitForExit()
+            return [PSCustomObject]@{
+                TimedOut = $true
+                ExitCode = $null
+                Output   = ""
+                Error    = "Docker command timed out after $TimeoutSeconds seconds."
+            }
+        }
+
+        $stdout = ""
+        $stderr = ""
+        if (Test-Path -LiteralPath $stdoutPath) {
+            $stdout = Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $stderrPath) {
+            $stderr = Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue
+        }
+
+        return [PSCustomObject]@{
+            TimedOut = $false
+            ExitCode = $process.ExitCode
+            Output   = $stdout
+            Error    = $stderr
+        }
+    } finally {
+        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Test-DockerEngine {
+    $result = Invoke-DockerCommandWithTimeout -Arguments @("info", "--format", "{{.ServerVersion}}") -TimeoutSeconds 15
+    if ($result.TimedOut) {
+        Write-Warning "Docker Engine health check timed out. Restart Docker Desktop before retrying Docker pruning."
+        return $false
+    }
+
+    return ($result.ExitCode -eq 0)
 }
 
 function Assert-Dependencies {
@@ -202,9 +263,10 @@ function Invoke-WslTrim {
     param([Parameter(Mandatory = $true)][string]$DistroName)
 
     Write-Host " Trimming: $DistroName" -ForegroundColor Gray
-    & wsl.exe --distribution $DistroName --user root --exec fstrim -av
+    # Direct WSL --exec does not always include /sbin in PATH, even for root.
+    & wsl.exe --distribution $DistroName --user root --exec /sbin/fstrim -av
     if ($LASTEXITCODE -ne 0) {
-        $script:HadFailures = $true
+        $script:HadWarnings = $true
         Write-Warning "fstrim failed for '$DistroName' (exit code $LASTEXITCODE). Its VHD may reclaim less space."
     }
 }
@@ -246,8 +308,7 @@ function Invoke-DockerPrune {
         throw "Docker pruning was requested, but docker.exe could not be found."
     }
 
-    & $script:DockerExe info --format '{{.ServerVersion}}' *> $null
-    if ($LASTEXITCODE -ne 0) {
+    if (-not (Test-DockerEngine)) {
         throw "Docker Engine is not available. Start Docker Desktop, then run this script again."
     }
 
@@ -267,8 +328,8 @@ function Stop-DockerAndWsl {
     Write-Step "Stopping Docker Desktop and WSL to release VHDX handles..."
 
     if ($null -ne $script:DockerExe) {
-        & $script:DockerExe desktop stop 2>$null
-        if ($LASTEXITCODE -ne 0) {
+        $stopResult = Invoke-DockerCommandWithTimeout -Arguments @("desktop", "stop") -TimeoutSeconds 60
+        if ($stopResult.TimedOut -or $stopResult.ExitCode -ne 0) {
             Write-Warning "Docker Desktop CLI stop failed; WSL shutdown will still stop its WSL VM."
         }
     }
@@ -339,8 +400,8 @@ function Start-DockerDesktop {
     }
 
     Write-Step "Restarting Docker Desktop..."
-    & $script:DockerExe desktop start
-    if ($LASTEXITCODE -ne 0) {
+    $startResult = Invoke-DockerCommandWithTimeout -Arguments @("desktop", "start") -TimeoutSeconds 60
+    if ($startResult.TimedOut -or $startResult.ExitCode -ne 0) {
         $script:HadFailures = $true
         Write-Warning "Docker Desktop did not restart successfully. Start it manually."
     }
@@ -390,11 +451,7 @@ if (-not $Force) {
     }
 }
 
-$dockerWasRunning = $false
-if ($null -ne $script:DockerExe) {
-    & $script:DockerExe info *> $null
-    $dockerWasRunning = ($LASTEXITCODE -eq 0)
-}
+$dockerWasRunning = ($null -ne (Get-Process -Name "Docker Desktop" -ErrorAction SilentlyContinue))
 
 $shouldRestartDocker = $dockerWasRunning -and (-not $NoRestartDocker)
 
@@ -447,8 +504,12 @@ foreach ($root in $targetRoots) {
 }
 
 if ($script:HadFailures) {
-    Write-Warning "Compaction completed with one or more warnings/errors. Review the messages above."
+    Write-Warning "Compaction completed with one or more errors. Review the messages above."
     exit 1
+}
+
+if ($script:HadWarnings) {
+    Write-Warning "Compaction succeeded with one or more nonfatal warnings. Review the messages above."
 }
 
 Write-Host "`nWSL and Docker compaction completed successfully." -ForegroundColor Green
