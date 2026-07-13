@@ -1,142 +1,454 @@
-# Requires -RunAsAdministrator
+#Requires -Version 5.1
+#Requires -RunAsAdministrator
 
-# 1. ENFORCE ADMIN PRIVILEGES
-$currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-$currentPrincipal = New-Object System.Security.Principal.WindowsPrincipal($currentIdentity)
-$adminRole = [System.Security.Principal.WindowsBuiltInRole]::Administrator
+<#
+.SYNOPSIS
+    Trims and compacts every VHDX below the current user's Docker and WSL folders.
 
-if (-not $currentPrincipal.IsInRole($adminRole)) {
-    Write-Error "This script MUST be run as an Administrator to manage system disk handles."
-    Exit
+.DESCRIPTION
+    Targets %LOCALAPPDATA%\Docker and %LOCALAPPDATA%\wsl. Uses Windows' built-in
+    WSL and DiskPart tools, so Optimize-VHD and the Hyper-V PowerShell module are
+    not required. Run from an elevated Windows PowerShell or PowerShell terminal.
+
+.PARAMETER DockerPrune
+    Ask (default), None, Standard, or Volumes. Standard removes unused Docker
+    objects but preserves volumes. Volumes also removes unused Docker volumes.
+
+.EXAMPLE
+    .\wsl-compact.ps1 -ListOnly
+
+.EXAMPLE
+    .\wsl-compact.ps1 -DockerPrune Standard
+
+.EXAMPLE
+    .\wsl-compact.ps1 -DockerPrune Volumes -Force
+#>
+
+[CmdletBinding()]
+param(
+    [ValidateSet("Ask", "None", "Standard", "Volumes")]
+    [string]$DockerPrune = "Ask",
+
+    [switch]$Force,
+    [switch]$NoRestartDocker,
+    [switch]$ListOnly
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+$dockerRoot = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "Docker"
+$wslRoot = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "wsl"
+$targetRoots = @($dockerRoot, $wslRoot)
+$script:DockerExe = $null
+$script:HadFailures = $false
+
+function Write-Step {
+    param([string]$Message)
+    Write-Host "`n$Message" -ForegroundColor Cyan
 }
 
-Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host " UNIVERSAL WSL & DOCKER MASTER CLEANUP " -ForegroundColor Cyan
-Write-Host "==========================================" -ForegroundColor Cyan
+function ConvertTo-NormalPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
 
-# 2. DYNAMIC DEEP-SCAN (REGISTRY + PHYSICAL APPDATA SCAN)
-Write-Host "`nScanning registry and filesystem for all virtual disks..." -ForegroundColor Yellow
-$targetList = @()
-$scannedPaths = @()
+    $normalPath = $Path -replace '^\\\\\?\\', ''
+    return [System.IO.Path]::GetFullPath($normalPath).TrimEnd('\')
+}
 
-# Helper function to add unique files to our menu
-function Add-VhdxTarget {
-    param([string]$DistroName, [string]$FilePath, [string]$Source)
-    $fullPath = [System.IO.Path]::GetFullPath($FilePath)
-    
-    # Prevent duplicate listings
-    if ($scannedPaths -contains $fullPath) { return }
-    if (-not (Test-Path $fullPath)) { return }
-    
-    $scannedPaths += $fullPath
-    $fileInfo = Get-Item $fullPath
-    $sizeGB = [math]::Round($fileInfo.Length / 1GB, 2)
-    
-    # Create a descriptive label based on the folder path
-    $parentDir = Split-Path (Split-Path $fullPath -Parent) -Leaf
-    $fileName = Split-Path $fullPath -Leaf
-    $cleanLabel = "$DistroName [$parentDir\$fileName]"
-    
-    Write-Host " Found: [$($targetList.Count)] $cleanLabel ($sizeGB GB)"
-    
-    $script:targetList += [PSCustomObject]@{ 
-        Name  = $DistroName; 
-        Label = $cleanLabel; 
-        Path  = $fullPath; 
-        Size  = $sizeGB 
+function Test-PathWithinRoot {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+
+    $normalPath = ConvertTo-NormalPath $Path
+    $normalRoot = ConvertTo-NormalPath $Root
+    return $normalPath.Equals($normalRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $normalPath.StartsWith("$normalRoot\", [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-FolderLogicalBytes {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        return [int64]0
+    }
+
+    $measurement = Get-ChildItem -LiteralPath $Path -Recurse -File -Force -ErrorAction SilentlyContinue |
+        Measure-Object -Property Length -Sum
+
+    if ($null -eq $measurement.Sum) {
+        return [int64]0
+    }
+
+    return [int64]$measurement.Sum
+}
+
+function Format-GB {
+    param([int64]$Bytes)
+    return ("{0:N2} GB" -f ($Bytes / 1GB))
+}
+
+function Find-DockerExecutable {
+    $command = Get-Command docker.exe -ErrorAction SilentlyContinue
+    if ($null -ne $command) {
+        return $command.Source
+    }
+
+    $knownPath = Join-Path $env:ProgramFiles "Docker\Docker\resources\bin\docker.exe"
+    if (Test-Path -LiteralPath $knownPath -PathType Leaf) {
+        return $knownPath
+    }
+
+    return $null
+}
+
+function Assert-Dependencies {
+    Write-Step "Checking required Windows tools..."
+
+    foreach ($commandName in @("wsl.exe", "diskpart.exe")) {
+        if ($null -eq (Get-Command $commandName -ErrorAction SilentlyContinue)) {
+            throw "Required Windows tool '$commandName' was not found. Install/enable WSL and retry."
+        }
+        Write-Host " Found: $commandName" -ForegroundColor DarkGray
+    }
+
+    $script:DockerExe = Find-DockerExecutable
+    if ($null -ne $script:DockerExe) {
+        Write-Host " Found: Docker CLI ($script:DockerExe)" -ForegroundColor DarkGray
+    } else {
+        Write-Warning "Docker CLI was not found. Docker pruning and graceful Docker Desktop restart will be unavailable."
     }
 }
 
-# Method A: Scan Registry base paths
-$wslRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss"
-if (Test-Path $wslRegPath) {
-    $distroKeys = Get-ChildItem $wslRegPath
-    foreach ($key in $distroKeys) {
-        $props = Get-ItemProperty $key.PsPath
-        $distroName = $props.DistributionName.Replace("`0", "").Trim()
-        $rawPath = $props.BasePath -replace '^\\\\\?\\', ''
-        
-        if (Test-Path $rawPath) {
-            $foundFiles = Get-ChildItem -Path $rawPath -Filter "*.vhdx" -Recurse -File -ErrorAction SilentlyContinue
-            foreach ($file in $foundFiles) {
-                Add-VhdxTarget -DistroName $distroName -FilePath $file.FullName -Source "Registry"
+function Get-WslRegistrations {
+    $registrations = @()
+    $registryPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss"
+
+    if (-not (Test-Path -LiteralPath $registryPath)) {
+        return $registrations
+    }
+
+    foreach ($key in Get-ChildItem -LiteralPath $registryPath -ErrorAction SilentlyContinue) {
+        try {
+            $properties = Get-ItemProperty -LiteralPath $key.PSPath
+            if ([string]::IsNullOrWhiteSpace([string]$properties.DistributionName) -or
+                [string]::IsNullOrWhiteSpace([string]$properties.BasePath)) {
+                continue
+            }
+
+            $registrations += [PSCustomObject]@{
+                Name     = ([string]$properties.DistributionName).Replace("`0", "").Trim()
+                BasePath = ConvertTo-NormalPath ([string]$properties.BasePath)
+            }
+        } catch {
+            Write-Warning "Could not read WSL registration '$($key.PSChildName)': $($_.Exception.Message)"
+        }
+    }
+
+    return $registrations
+}
+
+function Get-VhdTargets {
+    param([array]$Registrations)
+
+    $targets = @()
+    $seenPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+
+    foreach ($root in $targetRoots) {
+        if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+            Write-Warning "Target folder does not exist: $root"
+            continue
+        }
+
+        foreach ($file in Get-ChildItem -LiteralPath $root -Filter "*.vhdx" -Recurse -File -Force -ErrorAction SilentlyContinue) {
+            $fullPath = ConvertTo-NormalPath $file.FullName
+            if (-not $seenPaths.Add($fullPath)) {
+                continue
+            }
+
+            $registration = $null
+            foreach ($candidate in $Registrations) {
+                if (Test-PathWithinRoot -Path $fullPath -Root $candidate.BasePath) {
+                    $registration = $candidate
+                    break
+                }
+            }
+
+            $kind = "WSL"
+            if (Test-PathWithinRoot -Path $fullPath -Root $dockerRoot) {
+                $kind = "Docker"
+            }
+
+            $distroName = $null
+            if ($null -ne $registration) {
+                $distroName = $registration.Name
+            }
+
+            $targets += [PSCustomObject]@{
+                Kind       = $kind
+                DistroName = $distroName
+                Path       = $fullPath
+                Before     = [int64]$file.Length
+                Sparse     = (($file.Attributes -band [System.IO.FileAttributes]::SparseFile) -ne 0)
             }
         }
     }
+
+    return @($targets | Sort-Object Kind, Path)
 }
 
-# Method B: Scan standard default Local AppData folders to catch orphaned/unregistered Docker disks
-$localAppData = [System.Environment]::GetFolderPath("LocalApplicationData")
-$defaultPaths = @(
-    @{ Path = Join-Path $localAppData "Docker\wsl"; Name = "docker-desktop-data" }
-    @{ Path = Join-Path $localAppData "Packages\CanonicalGroupLimited"; Name = "Ubuntu" }
-)
+function Invoke-WslTrim {
+    param([Parameter(Mandatory = $true)][string]$DistroName)
 
-foreach ($dp in $defaultPaths) {
-    if (Test-Path $dp.Path) {
-        $foundFiles = Get-ChildItem -Path $dp.Path -Filter "*.vhdx" -Recurse -File -ErrorAction SilentlyContinue
-        foreach ($file in $foundFiles) {
-            Add-VhdxTarget -DistroName $dp.Name -FilePath $file.FullName -Source "Filesystem Scan"
+    Write-Host " Trimming: $DistroName" -ForegroundColor Gray
+    & wsl.exe --distribution $DistroName --user root --exec fstrim -av
+    if ($LASTEXITCODE -ne 0) {
+        $script:HadFailures = $true
+        Write-Warning "fstrim failed for '$DistroName' (exit code $LASTEXITCODE). Its VHD may reclaim less space."
+    }
+}
+
+function Get-DockerPruneChoice {
+    if ($DockerPrune -ne "Ask") {
+        return $DockerPrune
+    }
+
+    Write-Host "`nDocker cleanup options:" -ForegroundColor Yellow
+    Write-Host " [N] None      - compact space that Docker has already freed"
+    Write-Host " [S] Standard  - remove stopped containers, unused images/networks, and build cache"
+    Write-Host " [V] Volumes   - Standard cleanup plus unused volumes (persistent data may be deleted)" -ForegroundColor Red
+    $answer = (Read-Host "Choose N, S, or V [N]").Trim().ToUpperInvariant()
+
+    switch ($answer) {
+        "S" { return "Standard" }
+        "V" {
+            $confirmation = Read-Host "Type DELETE UNUSED VOLUMES to confirm"
+            if ($confirmation -ceq "DELETE UNUSED VOLUMES") {
+                return "Volumes"
+            }
+            Write-Warning "Volume deletion was not confirmed; using Standard cleanup."
+            return "Standard"
+        }
+        default { return "None" }
+    }
+}
+
+function Invoke-DockerPrune {
+    param([Parameter(Mandatory = $true)][string]$Mode)
+
+    if ($Mode -eq "None") {
+        Write-Host " Docker object pruning skipped." -ForegroundColor Yellow
+        return
+    }
+
+    if ($null -eq $script:DockerExe) {
+        throw "Docker pruning was requested, but docker.exe could not be found."
+    }
+
+    & $script:DockerExe info --format '{{.ServerVersion}}' *> $null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Docker Engine is not available. Start Docker Desktop, then run this script again."
+    }
+
+    $arguments = @("system", "prune", "--all", "--force")
+    if ($Mode -eq "Volumes") {
+        $arguments += "--volumes"
+    }
+
+    Write-Host " Running: docker $($arguments -join ' ')" -ForegroundColor Gray
+    & $script:DockerExe @arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Docker prune failed with exit code $LASTEXITCODE. Compaction has been stopped."
+    }
+}
+
+function Stop-DockerAndWsl {
+    Write-Step "Stopping Docker Desktop and WSL to release VHDX handles..."
+
+    if ($null -ne $script:DockerExe) {
+        & $script:DockerExe desktop stop 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Docker Desktop CLI stop failed; WSL shutdown will still stop its WSL VM."
         }
     }
+
+    & wsl.exe --shutdown
+    if ($LASTEXITCODE -ne 0) {
+        throw "wsl --shutdown failed with exit code $LASTEXITCODE. No disks were compacted."
+    }
+
+    Start-Sleep -Seconds 3
 }
 
-if ($targetList.Count -eq 0) {
-    Write-Error "No virtual disks found on your system."
-    Exit
+function Compact-VhdWithDiskPart {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "VHDX disappeared before compaction: $Path"
+    }
+
+    $file = Get-Item -LiteralPath $Path -Force
+    if (($file.Attributes -band [System.IO.FileAttributes]::SparseFile) -ne 0) {
+        throw "VHDX is marked as an NTFS sparse file and was skipped to avoid unsafe conversion: $Path"
+    }
+
+    $escapedPath = $Path.Replace('"', '""')
+    $lastFailure = $null
+
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $diskPartScript = Join-Path $env:TEMP ("wsl-compact-{0}.txt" -f ([guid]::NewGuid().ToString("N")))
+
+        try {
+            @(
+                "select vdisk file=`"$escapedPath`""
+                "compact vdisk"
+                "exit"
+            ) | Set-Content -LiteralPath $diskPartScript -Encoding ASCII
+
+            $output = & diskpart.exe /s $diskPartScript 2>&1
+            $exitCode = $LASTEXITCODE
+            $outputText = ($output | Out-String).Trim()
+
+            $hasError = $exitCode -ne 0 -or
+                $outputText -match '(?im)DiskPart has encountered an error|Virtual Disk Service error|The system cannot find|is not valid|failed'
+            $hasSuccess = $outputText -match '(?im)successfully compacted'
+
+            if (-not $hasError -and $hasSuccess) {
+                return
+            }
+
+            $lastFailure = "DiskPart failed for '$Path' on attempt $attempt.`n$outputText"
+        } finally {
+            Remove-Item -LiteralPath $diskPartScript -Force -ErrorAction SilentlyContinue
+        }
+
+        if ($attempt -lt 3) {
+            Write-Host "  DiskPart did not complete; retrying in 2 seconds..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 2
+        }
+    }
+
+    throw $lastFailure
 }
 
-# 3. SELECT TARGET VIA THE DYNAMICALLY GENERATED LIST
-$choice = -1
-while ($choice -lt 0 -or $choice -ge $targetList.Count) {
-    $input = Read-Host "`nSelect the number of the distribution file to clean and compact"
-    if (![int]::TryParse($input, [ref]$choice) -or $choice -lt 0 -or $choice -ge $targetList.Count) {
-        Write-Host "Invalid choice. Please pick a number from the list above." -ForegroundColor Red
+function Start-DockerDesktop {
+    if ($null -eq $script:DockerExe) {
+        Write-Warning "Docker CLI is unavailable, so Docker Desktop could not be restarted automatically."
+        return
+    }
+
+    Write-Step "Restarting Docker Desktop..."
+    & $script:DockerExe desktop start
+    if ($LASTEXITCODE -ne 0) {
+        $script:HadFailures = $true
+        Write-Warning "Docker Desktop did not restart successfully. Start it manually."
     }
 }
 
-$selected = $targetList[$choice]
-Write-Host "`nStarting cleanup for: $($selected.Label)" -ForegroundColor Green
+Write-Host "==============================================" -ForegroundColor Cyan
+Write-Host " WSL + DOCKER VHDX CLEANUP AND COMPACTION" -ForegroundColor Cyan
+Write-Host "==============================================" -ForegroundColor Cyan
 
-# 4. INTERNAL CLEANUP (WHILE RUNNING)
-Write-Host "`nStep 1: Running internal file pruning..." -ForegroundColor Cyan
-if ($selected.Name -like "*docker*") {
-    if (Get-Process -Name "Docker Desktop" -ErrorAction SilentlyContinue) {
-        Write-Host "Pruning active Docker system and builder caches..." -ForegroundColor Gray
-        docker system prune -a --volumes -f
-        docker builder prune --all -f
-    } else {
-        Write-Host "Docker Desktop application is offline. Skipping CLI container pruning." -ForegroundColor Yellow
-    }
-} else {
-    Write-Host "Trimming Linux filesystem for $($selected.Name)..." -ForegroundColor Gray
-    wsl -d $selected.Name --user root fstrim -av 2>$null
+Assert-Dependencies
+$registrations = @(Get-WslRegistrations)
+$targets = @(Get-VhdTargets -Registrations $registrations)
+
+if ($targets.Count -eq 0) {
+    throw "No VHDX files were found below '$dockerRoot' or '$wslRoot'."
 }
 
-# 5. BRUTE-FORCE UNLOCK (RELEASES HANDLES)
-Write-Host "`nStep 2: Shutting down WSL and Docker services to unlock files..." -ForegroundColor Cyan
-wsl --shutdown
-Stop-Process -Name "Docker Desktop" -Force -ErrorAction SilentlyContinue
-Stop-Service -Name "com.docker.service", "LxssManager", "VmCompute" -Force -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 5
+$rootBefore = @{}
+foreach ($root in $targetRoots) {
+    $rootBefore[$root] = Get-FolderLogicalBytes $root
+}
 
-# 6. COMPACTION AND AUTO-MANAGEMENT
-Write-Host "`nStep 3: Compacting storage and ensuring Sparse mode is active..." -ForegroundColor Cyan
-# Uses --allow-unsafe to bypass modern Windows corruption warnings for sparse mode
-wsl --manage $selected.Name --set-sparse true --allow-unsafe 2>$null
+Write-Step "The following VHDX files will be compacted:"
+foreach ($target in $targets) {
+    $association = "unregistered/raw VHDX"
+    if (-not [string]::IsNullOrWhiteSpace([string]$target.DistroName)) {
+        $association = "distro: $($target.DistroName)"
+    }
+    Write-Host (" [{0}] {1} ({2}; {3})" -f $target.Kind, $target.Path, (Format-GB $target.Before), $association)
+}
+
+Write-Host "`nFolder totals before compaction:" -ForegroundColor Yellow
+foreach ($root in $targetRoots) {
+    Write-Host (" {0}: {1}" -f $root, (Format-GB $rootBefore[$root]))
+}
+
+if ($ListOnly) {
+    Write-Host "`nList-only check completed; no changes were made." -ForegroundColor Green
+    exit 0
+}
+
+if (-not $Force) {
+    $confirmation = Read-Host "`nThis will stop Docker Desktop and every WSL distro. Type COMPACT to continue"
+    if ($confirmation -cne "COMPACT") {
+        Write-Host "Cancelled; no changes were made." -ForegroundColor Yellow
+        exit 0
+    }
+}
+
+$dockerWasRunning = $false
+if ($null -ne $script:DockerExe) {
+    & $script:DockerExe info *> $null
+    $dockerWasRunning = ($LASTEXITCODE -eq 0)
+}
+
+$shouldRestartDocker = $dockerWasRunning -and (-not $NoRestartDocker)
 
 try {
-    Optimize-VHD -Path $selected.Path -Mode Full -ErrorAction Stop
-} catch {
-    Write-Host "Optimize-VHD failed. Falling back to native Diskpart routine..." -ForegroundColor Yellow
-    $dp = "select vdisk file=""$($selected.Path)""`nattach vdisk readonly`ncompact vdisk`ndetach vdisk`nexit"
-    $dp | diskpart
+    Write-Step "Cleaning filesystems before compaction..."
+    $pruneChoice = Get-DockerPruneChoice
+    Invoke-DockerPrune -Mode $pruneChoice
+
+    $trimmedDistros = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($target in $targets) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$target.DistroName) -and $trimmedDistros.Add($target.DistroName)) {
+            Invoke-WslTrim -DistroName $target.DistroName
+        }
+    }
+
+    # Docker's data VHDX is not a registered WSL distro. fstrim -av inside
+    # docker-desktop also trims its mounted data disk.
+    $dockerDistro = $registrations | Where-Object { $_.Name -eq "docker-desktop" } | Select-Object -First 1
+    if ($null -ne $dockerDistro -and $trimmedDistros.Add($dockerDistro.Name)) {
+        Invoke-WslTrim -DistroName $dockerDistro.Name
+    }
+
+    Stop-DockerAndWsl
+
+    Write-Step "Compacting all discovered VHDX files..."
+    foreach ($target in $targets) {
+        Write-Host " Compacting: $($target.Path)" -ForegroundColor Gray
+        try {
+            Compact-VhdWithDiskPart -Path $target.Path
+            $after = [int64](Get-Item -LiteralPath $target.Path -Force).Length
+            $saved = [math]::Max([int64]0, ($target.Before - $after))
+            Write-Host ("  Before: {0}; after: {1}; reclaimed: {2}" -f
+                (Format-GB $target.Before), (Format-GB $after), (Format-GB $saved)) -ForegroundColor Green
+        } catch {
+            $script:HadFailures = $true
+            Write-Host "  ERROR: $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+} finally {
+    if ($shouldRestartDocker) {
+        Start-DockerDesktop
+    }
 }
 
-# 7. FINAL RESULTS STATEMENT
-$finalSize = [math]::Round((Get-Item $selected.Path).Length / 1GB, 2)
-Write-Host "`n==========================================" -ForegroundColor Green
-Write-Host ("Reclamation complete! Saved: {0:N2} GB" -f ($selected.Size - $finalSize))
-Write-Host ("New structural file size: {0:N2} GB" -f $finalSize) -ForegroundColor Green
-Write-Host "You may now restart Docker Desktop and WSL."
-Write-Host "==========================================" -ForegroundColor Green
+Write-Step "Final folder totals:"
+foreach ($root in $targetRoots) {
+    $after = Get-FolderLogicalBytes $root
+    $saved = [math]::Max([int64]0, ([int64]$rootBefore[$root] - $after))
+    Write-Host (" {0}: {1} (reclaimed {2})" -f $root, (Format-GB $after), (Format-GB $saved)) -ForegroundColor Green
+}
+
+if ($script:HadFailures) {
+    Write-Warning "Compaction completed with one or more warnings/errors. Review the messages above."
+    exit 1
+}
+
+Write-Host "`nWSL and Docker compaction completed successfully." -ForegroundColor Green
