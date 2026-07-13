@@ -5,3 +5,4 @@ WebCrawler/
 _install/
 **/site-packages/
 **/__pycache__/
+wsl-analysis-latest.txt
