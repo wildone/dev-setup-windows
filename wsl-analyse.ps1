@@ -20,7 +20,8 @@
     Minimum size included in the largest-file scan.
 
 .PARAMETER Quick
-    Skips the exhaustive largest-file scan. Directory analysis still runs.
+    Skips the exhaustive largest-file scan. Known-folder and Docker analysis
+    still run.
 
 .PARAMETER SummaryOnly
     Reports VHDX/filesystem totals, logs, and open deleted files without walking
@@ -28,6 +29,10 @@
 
 .PARAMETER IncludeDockerDesktop
     Includes Docker-managed WSL distributions in the default target list.
+
+.PARAMETER CommandTimeoutSeconds
+    Maximum time allowed for each potentially expensive Linux filesystem or
+    Docker query. Timed-out checks are reported and analysis continues.
 
 .PARAMETER OutputPath
     Report destination. Defaults to a timestamped text file in the current folder.
@@ -40,6 +45,9 @@
 
 .EXAMPLE
     .\wsl-analyse.ps1 -DistroName Ubuntu -Quick
+
+.EXAMPLE
+    .\wsl-analyse.ps1 -DistroName Ubuntu -SummaryOnly -CommandTimeoutSeconds 20
 #>
 
 [CmdletBinding()]
@@ -55,6 +63,10 @@ param(
     [switch]$Quick,
     [switch]$SummaryOnly,
     [switch]$IncludeDockerDesktop,
+
+    [ValidateRange(5, 600)]
+    [int]$CommandTimeoutSeconds = 30,
+
     [string]$OutputPath
 )
 
@@ -179,13 +191,22 @@ if ($SummaryOnly) {
 }
 
 $linuxAnalyzer = @'
-set -u
+set -uo pipefail
 export LC_ALL=C
 
 TOP="$1"
 MINIMUM_MB="$2"
 QUICK="$3"
 SUMMARY_ONLY="$4"
+COMMAND_TIMEOUT_SECONDS="$5"
+
+run_with_timeout() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "${COMMAND_TIMEOUT_SECONDS}s" "$@"
+    else
+        "$@"
+    fi
+}
 
 human_size() {
     if command -v numfmt >/dev/null 2>&1; then
@@ -205,9 +226,28 @@ print_sized_paths() {
 print_known_path() {
     path="$1"
     [ -e "$path" ] || return 0
-    result="$(du -x -s -B1 "$path" 2>/dev/null || true)"
+    result="$(run_with_timeout du -x -s -B1 "$path" 2>/dev/null)"
+    status=$?
+    if [ "$status" -eq 124 ]; then
+        printf 'Timed out after %ss while measuring %s\n' "$COMMAND_TIMEOUT_SECONDS" "$path" >&2
+    fi
     [ -n "$result" ] || return 0
     printf '%s\n' "$result"
+}
+
+print_timed_path_size() {
+    path="$1"
+    [ -e "$path" ] || return 0
+    result="$(run_with_timeout du -x -s -B1 "$path" 2>/dev/null)"
+    status=$?
+    if [ -n "$result" ]; then
+        bytes="${result%%[[:space:]]*}"
+        printf '%10s  %s\n' "$(human_size "$bytes")" "$path"
+    elif [ "$status" -eq 124 ]; then
+        printf '%10s  %s (measurement exceeded %ss; usually a large or high-churn tree)\n' 'TIMEOUT' "$path" "$COMMAND_TIMEOUT_SECONDS"
+    else
+        printf '%10s  %s (size unavailable)\n' 'UNKNOWN' "$path"
+    fi
 }
 
 printf '%s\n' '--- Distribution and filesystem ---'
@@ -219,9 +259,9 @@ else
     printf '%s\n' 'unknown'
 fi
 printf 'Kernel: %s\n' "$(uname -r)"
-printf '\nFilesystem capacity:\n'
+printf '\nFilesystem capacity (virtual maximum, not Windows host allocation):\n'
 df -hT /
-printf '\nFilesystem bytes (size, used, available, use%%, mount):\n'
+printf '\nFilesystem bytes (virtual size, used, available, use%%, mount):\n'
 df -B1 --output=size,used,avail,pcent,target / | tail -n 1
 printf '\nInode usage:\n'
 df -ih /
@@ -231,48 +271,97 @@ printf 'High-CPU processes can explain growth or make a directory scan slower:\n
 ps -eo pid,etime,pcpu,pmem,comm,args --sort=-pcpu 2>/dev/null | head -n "$((TOP + 1))"
 
 if [ "$SUMMARY_ONLY" = 'false' ]; then
-    printf '\n%s\n' '--- Largest directories on the WSL root filesystem ---'
-    printf 'Scanning directory usage to depth 2; this can take several minutes on a large distro...\n'
-    du -x -B1 --max-depth=2 / 2>/dev/null | sort -nr | head -n "$TOP" | print_sized_paths
-
-    printf '\n%s\n' '--- Common space-growth candidates ---'
+    printf '\n%s\n' '--- Largest known directories on the WSL root filesystem ---'
+    printf 'Measuring only fixed known paths; the WSL root is not traversed. Each path has a maximum of %ss.\n' "$COMMAND_TIMEOUT_SECONDS"
     {
         for path in \
-            /actions-runner \
-            /opt/actions-runner \
             /var/lib/docker \
             /var/lib/containers \
-            /var/lib/snapd \
             /var/lib/postgresql \
             /var/lib/mysql \
+            /var/lib/snapd \
             /var/lib/apt/lists \
             /var/cache/apt \
             /var/cache \
             /var/log \
+            /home \
+            /root \
             /usr/local \
             /opt \
             /srv \
             /tmp \
-            /root/.cache \
-            /root/.npm \
-            /root/.local/share/pnpm \
-            /root/.cargo \
-            /root/.gradle; do
-            print_known_path "$path"
-        done
-
-        find /home -xdev -mindepth 2 -maxdepth 5 -type d \
-            \( -name .cache -o -name .npm -o -name .pnpm-store -o -name .cargo \
-            -o -name .gradle -o -name .m2 -o -name .vscode-server \
-            -o -name .cursor-server -o -name node_modules -o -name target \
-            -o -name dist -o -name build -o -name .Trash -o -name actions-runner \) \
-            -prune -print0 2>/dev/null |
-        while IFS= read -r -d '' path; do
+            /actions-runner \
+            /opt/actions-runner; do
             print_known_path "$path"
         done
     } | sort -nr | head -n "$TOP" | print_sized_paths
 else
-    printf '\nDirectory and cache scans skipped because -SummaryOnly was selected.\n'
+    printf '\nKnown-folder and large-file scans skipped because -SummaryOnly was selected.\n'
+fi
+
+printf '\n%s\n' '--- Docker and persistent DinD runner storage ---'
+if ! command -v docker >/dev/null 2>&1; then
+    printf 'Docker CLI is not installed in this distribution.\n'
+elif ! run_with_timeout docker info >/dev/null 2>&1; then
+    printf 'Docker daemon is not reachable within %ss.\n' "$COMMAND_TIMEOUT_SECONDS"
+else
+    printf 'Outer Docker logical usage (time-limited):\n'
+    docker_df="$(run_with_timeout docker system df 2>&1)"
+    docker_df_status=$?
+    [ -z "$docker_df" ] || printf '%s\n' "$docker_df"
+    if [ "$docker_df_status" -eq 124 ]; then
+        printf 'Outer Docker usage query timed out after %ss.\n' "$COMMAND_TIMEOUT_SECONDS"
+    fi
+
+    runner_names="$(run_with_timeout docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '(dind-runner|actions-runner)' || true)"
+    if [ -z "$runner_names" ]; then
+        printf 'No persistent DinD runner containers were discovered.\n'
+    else
+        while IFS= read -r runner_name; do
+            [ -n "$runner_name" ] || continue
+            printf '\nRunner container: %s\n' "$runner_name"
+            runner_state="$(run_with_timeout docker inspect --format '{{.State.Status}}' "$runner_name" 2>/dev/null || true)"
+            printf '  Outer state: %s\n' "${runner_state:-unknown}"
+            printf '  Outer log configuration: '
+            run_with_timeout docker inspect --format '{{json .HostConfig.LogConfig}}' "$runner_name" 2>/dev/null || printf 'unavailable\n'
+
+            printf '  Resource-control environment:\n'
+            runner_env="$(run_with_timeout docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$runner_name" 2>/dev/null |
+                grep -E '^(RUNNER_DOCKER_|ACTIONS_RUNNER_HOOK_|RUNNER_JOB_ACTIVE_MARKER|RUNNER_MAINTENANCE_LOCK)' || true)"
+            if [ -n "$runner_env" ]; then
+                printf '%s\n' "$runner_env" | sed 's/^/    /'
+            else
+                printf '    none detected\n'
+            fi
+
+            mount_source="$(run_with_timeout docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/docker"}}{{println .Source}}{{end}}{{end}}' "$runner_name" 2>/dev/null |
+                head -n 1 || true)"
+            if [ -n "$mount_source" ]; then
+                printf '  Persistent nested-Docker path: %s\n' "$mount_source"
+                printf '  Allocated path size: '
+                print_timed_path_size "$mount_source" | sed 's/^/  /'
+                if [ -d "$mount_source/vfs/dir" ]; then
+                    layer_marks="$(run_with_timeout find "$mount_source/vfs/dir" -mindepth 1 -maxdepth 1 -type d -printf . 2>/dev/null || true)"
+                    printf '  VFS full-copy layer directories: %s\n' "${#layer_marks}"
+                fi
+            else
+                printf '  Persistent nested-Docker path: not found\n'
+            fi
+
+            printf '  Nested Docker driver and logging: '
+            nested_info="$(run_with_timeout docker exec "$runner_name" docker info --format 'driver={{.Driver}} logging={{.LoggingDriver}} images={{.Images}} containers={{.Containers}}' 2>/dev/null || true)"
+            printf '%s\n' "${nested_info:-unavailable}"
+            printf '  Nested Docker logical usage:\n'
+            nested_df="$(run_with_timeout docker exec "$runner_name" docker system df 2>&1)"
+            nested_df_status=$?
+            if [ -n "$nested_df" ]; then
+                printf '%s\n' "$nested_df" | sed 's/^/    /'
+            fi
+            if [ "$nested_df_status" -eq 124 ]; then
+                printf '    query timed out after %ss\n' "$COMMAND_TIMEOUT_SECONDS"
+            fi
+        done <<< "$runner_names"
+    fi
 fi
 
 printf '\n%s\n' '--- System log and package metadata ---'
@@ -297,9 +386,15 @@ if [ "$SUMMARY_ONLY" = 'true' ]; then
     printf '\nLargest-file scan skipped because -SummaryOnly was selected.\n'
 elif [ "$QUICK" = 'false' ]; then
     printf '\n%s\n' "--- Largest files (minimum ${MINIMUM_MB} MB) ---"
-    printf 'Scanning every file on the WSL root filesystem; this can take several minutes...\n'
-    find / -xdev -type f -size +"${MINIMUM_MB}M" -printf '%s\t%p\n' 2>/dev/null |
-        sort -nr | head -n "$TOP" | print_sized_paths
+    printf 'Scanning every file on the WSL root filesystem (maximum %ss)...\n' "$COMMAND_TIMEOUT_SECONDS"
+    file_output="$(run_with_timeout find / -xdev -type f -size +"${MINIMUM_MB}M" -printf '%s\t%p\n' 2>/dev/null)"
+    file_status=$?
+    if [ -n "$file_output" ]; then
+        printf '%s\n' "$file_output" | sort -nr | head -n "$TOP" | print_sized_paths
+    fi
+    if [ "$file_status" -eq 124 ]; then
+        printf 'Largest-file scan timed out after %ss; partial results are shown.\n' "$COMMAND_TIMEOUT_SECONDS"
+    fi
 else
     printf '\nLargest-file scan skipped because -Quick was selected.\n'
 fi
@@ -307,18 +402,30 @@ fi
 printf '\n%s\n' '--- Notes ---'
 printf '%s\n' 'Directory and file sizes are allocated Linux filesystem usage, not apparent file size.'
 printf '%s\n' 'Windows-mounted paths such as /mnt/c are excluded by the one-filesystem scans.'
+printf '%s\n' 'The filesystem Size reported by df is the VHDX virtual ceiling, not space currently occupied on Windows.'
 printf '%s\n' 'A VHDX can remain much larger than Linux used space until fstrim and host compaction run.'
+printf '%s\n' 'Docker logical sizes can severely understate physical use when the nested storage driver is vfs.'
 '@
 
 # Encode the Bash program so Windows PowerShell and wsl.exe cannot reinterpret
 # its quotes, variables, redirections, or pipeline operators.
 $linuxAnalyzerBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($linuxAnalyzer))
-$linuxBootstrap = "printf '%s' '$linuxAnalyzerBase64' | base64 --decode | bash -s -- $Top $MinimumFileSizeMB $quickValue $summaryOnlyValue"
+$linuxBootstrap = "printf '%s' '$linuxAnalyzerBase64' | base64 --decode | bash -s -- $Top $MinimumFileSizeMB $quickValue $summaryOnlyValue $CommandTimeoutSeconds"
 
 Write-ReportLine "WSL SPACE ANALYSIS" Cyan
 Write-ReportLine ("Generated: {0}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss zzz"))
 Write-ReportLine ("Computer: {0}" -f $env:COMPUTERNAME)
 Write-ReportLine ("Targets: {0}" -f (($targets.Name) -join ", "))
+Write-ReportLine ("Per-command timeout: {0} seconds" -f $CommandTimeoutSeconds)
+
+$systemDriveName = $env:SystemDrive.TrimEnd(':')
+$systemDrive = Get-PSDrive -Name $systemDriveName -ErrorAction SilentlyContinue
+if ($null -ne $systemDrive) {
+    Write-ReportLine ("Windows {0} free space: {1}; used space: {2}" -f $env:SystemDrive, (Format-Bytes $systemDrive.Free), (Format-Bytes $systemDrive.Used)) Yellow
+    if ($systemDrive.Free -lt 25GB) {
+        Write-ReportLine "WARNING: Windows system drive has less than 25 GB free. Avoid unbounded scans and new container builds until space is reclaimed." Red
+    }
+}
 
 $hadFailures = $false
 foreach ($target in $targets) {
@@ -341,9 +448,9 @@ foreach ($target in $targets) {
     Write-ReportLine ""
     Write-ReportLine "Starting read-only Linux scan..." Yellow
     if ($SummaryOnly) {
-        Write-ReportLine "Summary-only mode skips directory and large-file tree walks." DarkGray
+        Write-ReportLine "Summary-only mode skips directory and large-file tree walks but includes time-limited Docker/DinD analysis." DarkGray
     } else {
-        Write-ReportLine "Progress messages are printed before the two potentially slow scans." DarkGray
+        Write-ReportLine "Only fixed known folders are measured; no root-wide directory traversal is performed." DarkGray
     }
 
     & wsl.exe --distribution $target.Name --user root --exec sh -c $linuxBootstrap 2>&1 |
