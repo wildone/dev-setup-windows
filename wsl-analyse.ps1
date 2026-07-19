@@ -299,7 +299,7 @@ else
     printf '\nKnown-folder and large-file scans skipped because -SummaryOnly was selected.\n'
 fi
 
-printf '\n%s\n' '--- Docker and persistent DinD runner storage ---'
+printf '\n%s\n' '--- Docker and persistent runner container storage ---'
 if ! command -v docker >/dev/null 2>&1; then
     printf 'Docker CLI is not installed in this distribution.\n'
 elif ! run_with_timeout docker info >/dev/null 2>&1; then
@@ -313,9 +313,9 @@ else
         printf 'Outer Docker usage query timed out after %ss.\n' "$COMMAND_TIMEOUT_SECONDS"
     fi
 
-    runner_names="$(run_with_timeout docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '(dind-runner|actions-runner)' || true)"
+    runner_names="$(run_with_timeout docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '(actions-runner|wsl-runner|runner-wsl)' || true)"
     if [ -z "$runner_names" ]; then
-        printf 'No persistent DinD runner containers were discovered.\n'
+        printf 'No persistent runner containers were discovered.\n'
     else
         while IFS= read -r runner_name; do
             [ -n "$runner_name" ] || continue
@@ -448,7 +448,7 @@ foreach ($target in $targets) {
     Write-ReportLine ""
     Write-ReportLine "Starting read-only Linux scan..." Yellow
     if ($SummaryOnly) {
-        Write-ReportLine "Summary-only mode skips directory and large-file tree walks but includes time-limited Docker/DinD analysis." DarkGray
+        Write-ReportLine "Summary-only mode skips directory and large-file tree walks but includes time-limited Docker and runner-container analysis." DarkGray
     } else {
         Write-ReportLine "Only fixed known folders are measured; no root-wide directory traversal is performed." DarkGray
     }
