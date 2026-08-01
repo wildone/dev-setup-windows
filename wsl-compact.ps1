@@ -3,25 +3,70 @@
 
 <#
 .SYNOPSIS
-    Trims and compacts every VHDX below the current user's Docker and WSL folders.
+    Safely compacts idle custom WSL runner VHDX files.
 
 .DESCRIPTION
-    Targets %LOCALAPPDATA%\Docker and %LOCALAPPDATA%\wsl. Uses Windows' built-in
-    WSL and DiskPart tools, so Optimize-VHD and the Hyper-V PowerShell module are
-    not required. Run from an elevated Windows PowerShell or PowerShell terminal.
+    By default, uses wsl-runner-status.ps1 to find idle GitHub Actions runners
+    registered below C:\WSL. If any runner is busy, under maintenance, or
+    unknown, no compaction is attempted. When the complete fleet is idle and
+    -AllowWslShutdown is supplied, runner filesystems are trimmed, keepalives are
+    paused, the shared WSL 2 utility VM is shut down, runner VHDX files are
+    compacted, and previously running keepalives are restored. Pairing
+    -AllowWslShutdown with -Force deliberately overrides runner-state blockers
+    and terminates active jobs.
+
+    Use -All to request the original disruptive behavior: prune Docker Desktop
+    as requested, stop Docker Desktop and every WSL distribution, and compact all
+    VHDX files below the Docker, WSL, and RunnerRoot folders.
+
+    Uses Windows' built-in WSL and DiskPart tools, so Optimize-VHD and the Hyper-V
+    PowerShell module are not required. Run from an elevated Windows PowerShell
+    or PowerShell terminal.
 
 .PARAMETER DockerPrune
     Ask (default), None, Standard, or Volumes. Standard removes unused Docker
     objects but preserves volumes. Volumes also removes unused Docker volumes.
+    This option is used only with -All.
+
+.PARAMETER All
+    Uses the original full-compaction mode, which stops Docker Desktop and every
+    WSL distribution. Without this switch, runner VHDX compaction proceeds only
+    when every custom runner is verified idle or offline.
+
+.PARAMETER RunnerRoot
+    Windows folder containing custom runner WSL distributions. Default: C:\WSL.
+
+.PARAMETER LocalOnly
+    Uses only local runner activity checks. By default, local state must also be
+    verified against GitHub through gh.
+
+.PARAMETER AllowWslShutdown
+    Allows safe runner mode to stop Docker Desktop, every WSL distribution, and
+    the shared WSL 2 utility VM after every custom runner is verified idle, or
+    when runner-state blockers are explicitly overridden with -Force. Required
+    because DiskPart cannot compact a VHDX still attached to that VM.
+
+.PARAMETER Force
+    Skips confirmation prompts. In runner mode, only the combination of -Force
+    and -AllowWslShutdown also overrides BUSY, MAINTENANCE, or UNKNOWN runner
+    states and bypasses runner activity probes. Active GitHub Actions job
+    attempts will be interrupted; configured retry automation can reschedule them.
+
+.PARAMETER NoRestartRunners
+    Does not restart idle runner distributions or their Windows keepalive tasks
+    after compaction. Scheduled tasks remain enabled for a future trigger.
 
 .EXAMPLE
     .\wsl-compact.ps1 -ListOnly
 
 .EXAMPLE
-    .\wsl-compact.ps1 -DockerPrune Standard
+    .\wsl-compact.ps1 -AllowWslShutdown -Force
 
 .EXAMPLE
-    .\wsl-compact.ps1 -DockerPrune Volumes -Force
+    .\wsl-compact.ps1 -All -DockerPrune Standard
+
+.EXAMPLE
+    .\wsl-compact.ps1 -All -DockerPrune Volumes -Force
 #>
 
 [CmdletBinding()]
@@ -29,8 +74,13 @@ param(
     [ValidateSet("Ask", "None", "Standard", "Volumes")]
     [string]$DockerPrune = "Ask",
 
+    [switch]$All,
+    [string]$RunnerRoot = "C:\WSL",
+    [switch]$LocalOnly,
+    [switch]$AllowWslShutdown,
     [switch]$Force,
     [switch]$NoRestartDocker,
+    [switch]$NoRestartRunners,
     [switch]$ListOnly
 )
 
@@ -39,7 +89,8 @@ $ErrorActionPreference = "Stop"
 
 $dockerRoot = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "Docker"
 $wslRoot = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "wsl"
-$targetRoots = @($dockerRoot, $wslRoot)
+$runnerRootNormal = [System.IO.Path]::GetFullPath(($RunnerRoot -replace '^\\\\\?\\', '')).TrimEnd('\')
+$targetRoots = @($dockerRoot, $wslRoot, $runnerRootNormal) | Select-Object -Unique
 $script:DockerExe = $null
 $script:HadFailures = $false
 $script:HadWarnings = $false
@@ -75,10 +126,13 @@ function Get-FolderLogicalBytes {
         return [int64]0
     }
 
-    $measurement = Get-ChildItem -LiteralPath $Path -Recurse -File -Force -ErrorAction SilentlyContinue |
-        Measure-Object -Property Length -Sum
+    $files = @(Get-ChildItem -LiteralPath $Path -Recurse -File -Force -ErrorAction SilentlyContinue)
+    if ($files.Count -eq 0) {
+        return [int64]0
+    }
 
-    if ($null -eq $measurement.Sum) {
+    $measurement = $files | Measure-Object -Property Length -Sum
+    if ($null -eq $measurement -or $null -eq $measurement.Sum) {
         return [int64]0
     }
 
@@ -174,11 +228,33 @@ function Assert-Dependencies {
         Write-Host " Found: $commandName" -ForegroundColor DarkGray
     }
 
-    $script:DockerExe = Find-DockerExecutable
-    if ($null -ne $script:DockerExe) {
-        Write-Host " Found: Docker CLI ($script:DockerExe)" -ForegroundColor DarkGray
+    if ($All) {
+        $script:DockerExe = Find-DockerExecutable
+        if ($null -ne $script:DockerExe) {
+            Write-Host " Found: Docker CLI ($script:DockerExe)" -ForegroundColor DarkGray
+        } else {
+            Write-Warning "Docker CLI was not found. Docker pruning and graceful Docker Desktop restart will be unavailable."
+        }
     } else {
-        Write-Warning "Docker CLI was not found. Docker pruning and graceful Docker Desktop restart will be unavailable."
+        $statusScript = Join-Path $PSScriptRoot "wsl-runner-status.ps1"
+        if (-not (Test-Path -LiteralPath $statusScript -PathType Leaf)) {
+            throw "Required runner status script was not found: $statusScript"
+        }
+        Write-Host " Found: wsl-runner-status.ps1" -ForegroundColor DarkGray
+
+        foreach ($commandName in @("Get-ScheduledTask", "Stop-ScheduledTask", "Start-ScheduledTask")) {
+            if ($null -eq (Get-Command $commandName -ErrorAction SilentlyContinue)) {
+                throw "Required ScheduledTasks command '$commandName' was not found."
+            }
+        }
+        Write-Host " Found: ScheduledTasks management commands" -ForegroundColor DarkGray
+
+        $script:DockerExe = Find-DockerExecutable
+        if ($null -ne $script:DockerExe) {
+            Write-Host " Found: Docker CLI ($script:DockerExe)" -ForegroundColor DarkGray
+        } elseif ($null -ne (Get-Process -Name "Docker Desktop" -ErrorAction SilentlyContinue)) {
+            throw "Docker Desktop is running but docker.exe was not found, so it cannot be stopped and restarted safely."
+        }
     }
 }
 
@@ -201,6 +277,7 @@ function Get-WslRegistrations {
             $registrations += [PSCustomObject]@{
                 Name     = ([string]$properties.DistributionName).Replace("`0", "").Trim()
                 BasePath = ConvertTo-NormalPath ([string]$properties.BasePath)
+                Version  = [int]$properties.Version
             }
         } catch {
             Write-Warning "Could not read WSL registration '$($key.PSChildName)': $($_.Exception.Message)"
@@ -263,11 +340,49 @@ function Invoke-WslTrim {
     param([Parameter(Mandatory = $true)][string]$DistroName)
 
     Write-Host " Trimming: $DistroName" -ForegroundColor Gray
-    # Direct WSL --exec does not always include /sbin in PATH, even for root.
-    & wsl.exe --distribution $DistroName --user root --exec /sbin/fstrim -av
-    if ($LASTEXITCODE -ne 0) {
+    $id = [guid]::NewGuid().ToString("N")
+    $stdoutPath = Join-Path $env:TEMP "wsl-trim-$id.out"
+    $stderrPath = Join-Path $env:TEMP "wsl-trim-$id.err"
+    $process = $null
+
+    try {
+        # Direct WSL --exec does not always include /sbin in PATH, even for root.
+        $process = Start-Process -FilePath "wsl.exe" -ArgumentList @(
+            "--distribution", $DistroName,
+            "--user", "root",
+            "--exec", "/sbin/fstrim", "-av"
+        ) -WindowStyle Hidden -PassThru `
+            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+
+        if (-not $process.WaitForExit(45000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            $script:HadWarnings = $true
+            Write-Warning "fstrim timed out for '$DistroName' after 45 seconds. Compaction will continue, but its VHD may reclaim less space."
+            return
+        }
+        $process.WaitForExit()
+
+        $stdout = if (Test-Path -LiteralPath $stdoutPath) {
+            [string](Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue)
+        } else { "" }
+        $stderr = if (Test-Path -LiteralPath $stderrPath) {
+            [string](Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue)
+        } else { "" }
+        if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+            Write-Host $stdout
+        }
+        if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+            Write-Host $stderr -ForegroundColor DarkGray
+        }
+
+        if ($process.ExitCode -eq 0) {
+            return
+        }
+
         $script:HadWarnings = $true
-        Write-Warning "fstrim failed for '$DistroName' (exit code $LASTEXITCODE). Its VHD may reclaim less space."
+        Write-Warning "fstrim failed for '$DistroName' (exit code $($process.ExitCode)). Its VHD may reclaim less space."
+    } finally {
+        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -324,22 +439,30 @@ function Invoke-DockerPrune {
     }
 }
 
-function Stop-DockerAndWsl {
-    Write-Step "Stopping Docker Desktop and WSL to release VHDX handles..."
-
+function Stop-DockerDesktopForCompaction {
+    Write-Step "Stopping Docker Desktop..."
     if ($null -ne $script:DockerExe) {
         $stopResult = Invoke-DockerCommandWithTimeout -Arguments @("desktop", "stop") -TimeoutSeconds 60
         if ($stopResult.TimedOut -or $stopResult.ExitCode -ne 0) {
             Write-Warning "Docker Desktop CLI stop failed; WSL shutdown will still stop its WSL VM."
         }
     }
+}
 
+function Stop-WslForCompaction {
+    Write-Step "Stopping the shared WSL 2 utility VM to release VHDX handles..."
     & wsl.exe --shutdown
     if ($LASTEXITCODE -ne 0) {
         throw "wsl --shutdown failed with exit code $LASTEXITCODE. No disks were compacted."
     }
 
     Start-Sleep -Seconds 3
+}
+
+function Stop-DockerAndWsl {
+    Write-Step "Stopping Docker Desktop and WSL to release VHDX handles..."
+    Stop-DockerDesktopForCompaction
+    Stop-WslForCompaction
 }
 
 function Compact-VhdWithDiskPart {
@@ -407,12 +530,479 @@ function Start-DockerDesktop {
     }
 }
 
+function Invoke-RunnerStatusCheck {
+    param([string]$DistributionName)
+
+    $statusScript = Join-Path $PSScriptRoot "wsl-runner-status.ps1"
+    $arguments = @(
+        "-NoProfile"
+        "-ExecutionPolicy", "Bypass"
+        "-File", $statusScript
+        "-RunnerRoot", $runnerRootNormal
+        "-AsJson"
+    )
+    if ($LocalOnly) {
+        $arguments += "-LocalOnly"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($DistributionName)) {
+        $arguments += @("-DistroName", $DistributionName)
+    }
+
+    $id = [guid]::NewGuid().ToString("N")
+    $stdoutPath = Join-Path $env:TEMP "wsl-runner-status-$id.out"
+    $stderrPath = Join-Path $env:TEMP "wsl-runner-status-$id.err"
+    $process = $null
+
+    try {
+        $process = Start-Process -FilePath "powershell.exe" -ArgumentList $arguments `
+            -WindowStyle Hidden -Wait -PassThru `
+            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+        $statusExitCode = $process.ExitCode
+        $json = if (Test-Path -LiteralPath $stdoutPath) {
+            Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue
+        } else {
+            ""
+        }
+        $stderr = if (Test-Path -LiteralPath $stderrPath) {
+            Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue
+        } else {
+            ""
+        }
+
+        try {
+            $parsed = $json | ConvertFrom-Json
+        } catch {
+            $details = @($json.Trim(), $stderr.Trim()) | Where-Object { $_ }
+            throw "Runner status check failed with exit code $statusExitCode and did not return valid JSON.`n$($details -join "`n")"
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+            Write-Verbose ("Runner status stderr: {0}" -f $stderr.Trim())
+        }
+
+        return @($parsed)
+    } finally {
+        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-ForcedRunnerStatuses {
+    param([Parameter(Mandatory = $true)][array]$Registrations)
+
+    $runnerRegistrations = @($Registrations | Where-Object {
+        $_.Version -eq 2 -and (Test-PathWithinRoot -Path $_.BasePath -Root $runnerRootNormal)
+    })
+    if ($runnerRegistrations.Count -eq 0) {
+        throw "No WSL 2 runner distributions were found below '$runnerRootNormal'."
+    }
+
+    return @($runnerRegistrations | Sort-Object Name | ForEach-Object {
+        [pscustomobject]@{
+            Distro       = [string]$_.Name
+            Decision     = "FORCED"
+            SafeToCompact = $false
+            Details      = "Runner activity was deliberately not checked."
+        }
+    })
+}
+
+function Get-IdleRunnerVhdTargets {
+    param(
+        [Parameter(Mandatory = $true)][array]$Statuses,
+        [Parameter(Mandatory = $true)][array]$Registrations,
+        [switch]$IncludeUnsafe
+    )
+
+    $targets = @()
+    $eligibleStatuses = if ($IncludeUnsafe) {
+        @($Statuses)
+    } else {
+        @($Statuses | Where-Object { [bool]$_.SafeToCompact })
+    }
+
+    foreach ($status in $eligibleStatuses) {
+        $registration = $Registrations |
+            Where-Object { $_.Name -eq [string]$status.Distro } |
+            Select-Object -First 1
+        if ($null -eq $registration) {
+            Write-Warning "No WSL registration was found for '$($status.Distro)'; it will be skipped."
+            continue
+        }
+
+        $files = @(Get-ChildItem -LiteralPath $registration.BasePath -Filter "*.vhdx" -Recurse -File -Force -ErrorAction SilentlyContinue)
+        if ($files.Count -eq 0) {
+            Write-Warning "No VHDX file was found for '$($status.Distro)' below '$($registration.BasePath)'."
+            continue
+        }
+
+        foreach ($file in $files) {
+            $targets += [PSCustomObject]@{
+                Kind       = "Runner"
+                DistroName = [string]$status.Distro
+                Decision   = [string]$status.Decision
+                Path       = ConvertTo-NormalPath $file.FullName
+                Before     = [int64]$file.Length
+                Sparse     = (($file.Attributes -band [System.IO.FileAttributes]::SparseFile) -ne 0)
+            }
+        }
+    }
+
+    return @($targets | Sort-Object DistroName, Path)
+}
+
+function Start-WslDistribution {
+    param([Parameter(Mandatory = $true)][string]$DistroName)
+
+    Write-Host " Restarting runner distro: $DistroName" -ForegroundColor Gray
+    & wsl.exe --distribution $DistroName --user root --exec /bin/true 2>&1 | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        $script:HadFailures = $true
+        Write-Warning "Could not restart '$DistroName' (exit code $LASTEXITCODE)."
+        return
+    }
+
+    Start-Sleep -Seconds 2
+}
+
+function Suspend-RunnerKeepalive {
+    param([Parameter(Mandatory = $true)][string]$DistroName)
+
+    $taskName = "WSL Runner Autostart - $DistroName"
+    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if ($null -eq $task) {
+        return [PSCustomObject]@{
+            TaskName = $taskName
+            Found = $false
+            WasRunning = $false
+            Suspended = $true
+            Error = ""
+        }
+    }
+
+    $wasRunning = [string]$task.State -eq "Running"
+    if (-not $wasRunning) {
+        return [PSCustomObject]@{
+            TaskName = $taskName
+            Found = $true
+            WasRunning = $false
+            Suspended = $true
+            Error = ""
+        }
+    }
+
+    Write-Host " Pausing Windows keepalive task: $taskName" -ForegroundColor Gray
+    try {
+        Stop-ScheduledTask -InputObject $task -ErrorAction Stop
+    } catch {
+        return [PSCustomObject]@{
+            TaskName = $taskName
+            Found = $true
+            WasRunning = $true
+            Suspended = $false
+            Error = $_.Exception.Message
+        }
+    }
+
+    $deadline = (Get-Date).AddSeconds(15)
+    do {
+        $current = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($null -eq $current -or [string]$current.State -ne "Running") {
+            return [PSCustomObject]@{
+                TaskName = $taskName
+                Found = $true
+                WasRunning = $true
+                Suspended = $true
+                Error = ""
+            }
+        }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+
+    return [PSCustomObject]@{
+        TaskName = $taskName
+        Found = $true
+        WasRunning = $true
+        Suspended = $false
+        Error = "The scheduled task remained in the Running state for more than 15 seconds."
+    }
+}
+
+function Restore-RunnerKeepalive {
+    param([Parameter(Mandatory = $true)]$KeepaliveState)
+
+    if (-not [bool]$KeepaliveState.Found -or -not [bool]$KeepaliveState.WasRunning) {
+        return $false
+    }
+
+    Write-Host " Restarting Windows keepalive task: $($KeepaliveState.TaskName)" -ForegroundColor Gray
+    try {
+        Start-ScheduledTask -TaskName ([string]$KeepaliveState.TaskName) -ErrorAction Stop
+        Start-Sleep -Seconds 2
+        return $true
+    } catch {
+        $script:HadFailures = $true
+        Write-Warning "Could not restart '$($KeepaliveState.TaskName)': $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Invoke-IdleRunnerCompaction {
+    param([Parameter(Mandatory = $true)][array]$Registrations)
+
+    $forceFleetShutdown = $Force -and $AllowWslShutdown
+
+    if ($DockerPrune -ne "Ask") {
+        Write-Warning "-DockerPrune is ignored in idle-runner mode. Use -All to prune Docker Desktop."
+    }
+
+    Write-Step "Checking custom runner activity..."
+    $statuses = if ($forceFleetShutdown) {
+        Write-Warning "FORCE override: runner activity probes are bypassed so every registered runner below '$runnerRootNormal' is included."
+        @(Get-ForcedRunnerStatuses -Registrations $Registrations)
+    } else {
+        @(Invoke-RunnerStatusCheck)
+    }
+    $initialStatuses = @($statuses)
+    foreach ($status in $statuses) {
+        $color = if ([bool]$status.SafeToCompact) { "Green" } else { "Yellow" }
+        Write-Host (" {0,-24} {1,-12} {2}" -f $status.Distro, $status.Decision, $status.Details) -ForegroundColor $color
+    }
+
+    $targets = @(Get-IdleRunnerVhdTargets `
+        -Statuses $statuses `
+        -Registrations $Registrations `
+        -IncludeUnsafe:$forceFleetShutdown)
+    $skipped = @($statuses | Where-Object { -not [bool]$_.SafeToCompact })
+
+    Write-Step "Runner VHDX readiness:"
+    if ($targets.Count -eq 0) {
+        Write-Host " No idle runner VHDX files are currently available." -ForegroundColor Yellow
+        Write-Host " No changes were made." -ForegroundColor Green
+        exit 0
+    }
+
+    foreach ($target in $targets) {
+        Write-Host (" [{0}] {1} ({2}; {3})" -f
+            $target.Decision, $target.Path, (Format-GB $target.Before), $target.DistroName)
+    }
+
+    if ($skipped.Count -gt 0) {
+        Write-Host "`nBlocking runners:" -ForegroundColor Yellow
+        foreach ($status in $skipped) {
+            Write-Host (" {0}: {1}" -f $status.Distro, $status.Decision)
+        }
+        if ($forceFleetShutdown) {
+            Write-Warning "FORCE override enabled: active job attempts will be interrupted when the shared WSL 2 utility VM is shut down; configured retry automation can reschedule them."
+        } else {
+            Write-Warning "No VHDX files will be compacted. DiskPart requires the shared WSL 2 utility VM to be shut down, so every custom runner must be idle or offline in the same maintenance window. Use -AllowWslShutdown -Force only to deliberately terminate active jobs and override this block."
+            exit 0
+        }
+    }
+
+    if ($ListOnly) {
+        if ($forceFleetShutdown -and $skipped.Count -gt 0) {
+            Write-Host "`nForce preview: the blocking runners shown above would be terminated." -ForegroundColor Yellow
+        } else {
+            Write-Host "`nAll custom runners are ready. Actual compaction requires -AllowWslShutdown." -ForegroundColor Green
+        }
+        Write-Host "List-only check completed; no changes were made." -ForegroundColor Green
+        exit 0
+    }
+
+    if (-not $AllowWslShutdown) {
+        Write-Warning "No changes were made. Rerun with -AllowWslShutdown to permit stopping Docker Desktop, every WSL distribution, and the shared WSL 2 utility VM."
+        exit 0
+    }
+
+    if (-not $Force) {
+        $confirmation = Read-Host "`nEvery runner is idle. This will stop Docker Desktop and all WSL distributions, compact runner VHDX files, then restore runner keepalives. Type COMPACT FLEET to continue"
+        if ($confirmation -cne "COMPACT FLEET") {
+            Write-Host "Cancelled; no changes were made." -ForegroundColor Yellow
+            exit 0
+        }
+    }
+
+    $runnerRootBefore = Get-FolderLogicalBytes $runnerRootNormal
+    $compactedCount = 0
+    $keepaliveStates = New-Object 'System.Collections.Generic.List[object]'
+    $dockerWasRunning = $null -ne (Get-Process -Name "Docker Desktop" -ErrorAction SilentlyContinue)
+    $shouldRestartDocker = $dockerWasRunning -and (-not $NoRestartDocker)
+    $dockerStopAttempted = $false
+    $wslWasShutdown = $false
+    $abortMessage = ""
+
+    try {
+        Write-Step $(if ($forceFleetShutdown) { "Trimming available runner filesystems..." } else { "Trimming idle runner filesystems..." })
+        $trimStatuses = if ($forceFleetShutdown) {
+            @($statuses | Where-Object { $_.Decision -in @("IDLE", "BUSY", "FORCED") })
+        } else {
+            @($statuses | Where-Object { $_.Decision -eq "IDLE" })
+        }
+        foreach ($status in $trimStatuses) {
+            Invoke-WslTrim -DistroName ([string]$status.Distro)
+        }
+
+        Write-Step "Rechecking the complete runner fleet..."
+        if ($forceFleetShutdown) {
+            Write-Warning "FORCE override remains active; runner activity recheck was skipped."
+        } else {
+            $statuses = @(Invoke-RunnerStatusCheck)
+            $runtimeBlocked = @($statuses | Where-Object { -not [bool]$_.SafeToCompact })
+            if ($runtimeBlocked.Count -gt 0) {
+                $blockedSummary = (($runtimeBlocked | ForEach-Object { "$($_.Distro)=$($_.Decision)" }) -join ", ")
+                $abortMessage = "Runner state changed before maintenance: $blockedSummary"
+            }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($abortMessage)) {
+            Write-Step "Pausing runner keepalive tasks..."
+            foreach ($status in $statuses) {
+                $keepaliveState = Suspend-RunnerKeepalive -DistroName ([string]$status.Distro)
+                [void]$keepaliveStates.Add($keepaliveState)
+                if (-not [bool]$keepaliveState.Suspended) {
+                    $script:HadFailures = $true
+                    $abortMessage = "Could not pause '$($keepaliveState.TaskName)': $($keepaliveState.Error)"
+                    break
+                }
+            }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($abortMessage)) {
+            if ($dockerWasRunning) {
+                Stop-DockerDesktopForCompaction
+                $dockerStopAttempted = $true
+            }
+
+            Write-Step "Final runner check before shared WSL shutdown..."
+            if ($forceFleetShutdown) {
+                Write-Warning "FORCE override will terminate every selected runner now; final activity check was skipped."
+            } else {
+                $statuses = @(Invoke-RunnerStatusCheck)
+                $runtimeBlocked = @($statuses | Where-Object { -not [bool]$_.SafeToCompact })
+                if ($runtimeBlocked.Count -gt 0) {
+                    $blockedSummary = (($runtimeBlocked | ForEach-Object { "$($_.Distro)=$($_.Decision)" }) -join ", ")
+                    $abortMessage = "Runner state changed after pausing keepalives: $blockedSummary"
+                }
+            }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($abortMessage)) {
+            Stop-WslForCompaction
+            $wslWasShutdown = $true
+
+            Write-Step "Compacting runner VHDX files with the shared WSL VM stopped..."
+            foreach ($target in $targets) {
+                Write-Host " Compacting: $($target.Path)" -ForegroundColor Gray
+                try {
+                    $before = [int64](Get-Item -LiteralPath $target.Path -Force).Length
+                    Compact-VhdWithDiskPart -Path $target.Path
+                    $after = [int64](Get-Item -LiteralPath $target.Path -Force).Length
+                    $saved = [math]::Max([int64]0, ($before - $after))
+                    $compactedCount++
+                    Write-Host ("  Before: {0}; after: {1}; reclaimed: {2}" -f
+                        (Format-GB $before), (Format-GB $after), (Format-GB $saved)) -ForegroundColor Green
+                } catch {
+                    $script:HadFailures = $true
+                    Write-Host "  ERROR: $($_.Exception.Message)" -ForegroundColor Red
+                }
+            }
+        } else {
+            Write-Warning "$abortMessage. No WSL shutdown or VHDX compaction was performed."
+        }
+    } finally {
+        if (-not $NoRestartRunners) {
+            Write-Step "Restoring runner keepalive tasks..."
+            foreach ($keepaliveState in $keepaliveStates) {
+                [void](Restore-RunnerKeepalive -KeepaliveState $keepaliveState)
+            }
+
+            # Restore a runner that was initially online even if it had no
+            # running Windows keepalive task to restart.
+            $initiallyOnlineStatuses = if ($forceFleetShutdown) {
+                @($initialStatuses | Where-Object { $_.Decision -in @("IDLE", "BUSY", "FORCED") })
+            } else {
+                @($initialStatuses | Where-Object { $_.Decision -eq "IDLE" })
+            }
+            foreach ($status in $initiallyOnlineStatuses) {
+                $state = $keepaliveStates |
+                    Where-Object { $_.TaskName -eq "WSL Runner Autostart - $($status.Distro)" } |
+                    Select-Object -First 1
+                if ($wslWasShutdown -and ($null -eq $state -or -not [bool]$state.WasRunning)) {
+                    Start-WslDistribution -DistroName ([string]$status.Distro)
+                }
+            }
+        }
+
+        if ($shouldRestartDocker -and ($dockerStopAttempted -or $wslWasShutdown)) {
+            Start-DockerDesktop
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($abortMessage)) {
+        if ($script:HadFailures) {
+            exit 1
+        }
+        exit 0
+    }
+
+    if (-not $wslWasShutdown) {
+        Write-Warning "The shared WSL VM was not shut down, so no VHDX compaction was attempted."
+        exit 1
+    }
+
+    # Confirm that all runner keepalive tasks which were previously running
+    # were restored before reporting success.
+    if (-not $NoRestartRunners) {
+        foreach ($state in $keepaliveStates | Where-Object { [bool]$_.WasRunning }) {
+            $task = Get-ScheduledTask -TaskName ([string]$state.TaskName) -ErrorAction SilentlyContinue
+            if ($null -eq $task -or [string]$task.State -ne "Running") {
+                $script:HadFailures = $true
+                Write-Warning "Keepalive task '$($state.TaskName)' is not running after restoration."
+            }
+        }
+    }
+
+    $runnerRootAfter = Get-FolderLogicalBytes $runnerRootNormal
+    $totalSaved = [math]::Max([int64]0, ([int64]$runnerRootBefore - [int64]$runnerRootAfter))
+    Write-Step "Runner fleet compaction summary:"
+    Write-Host (" Compacted VHDX files: {0}" -f $compactedCount)
+    Write-Host (" {0}: {1} (reclaimed {2})" -f
+        $runnerRootNormal, (Format-GB $runnerRootAfter), (Format-GB $totalSaved)) -ForegroundColor Green
+
+    if ($script:HadFailures) {
+        Write-Warning "Runner fleet compaction completed with one or more errors."
+        exit 1
+    }
+    if ($script:HadWarnings) {
+        Write-Warning "Runner fleet compaction completed with one or more nonfatal warnings."
+    }
+
+    Write-Host "`nRunner fleet compaction completed successfully." -ForegroundColor Green
+    exit 0
+}
+
 Write-Host "==============================================" -ForegroundColor Cyan
 Write-Host " WSL + DOCKER VHDX CLEANUP AND COMPACTION" -ForegroundColor Cyan
 Write-Host "==============================================" -ForegroundColor Cyan
 
 Assert-Dependencies
 $registrations = @(Get-WslRegistrations)
+
+if (-not $All) {
+    Invoke-IdleRunnerCompaction -Registrations $registrations
+}
+
+# Full mode also includes registered distributions stored outside the standard
+# Docker, LocalAppData WSL, and custom runner roots.
+foreach ($registration in $registrations) {
+    $alreadyCovered = @($targetRoots | Where-Object {
+        Test-PathWithinRoot -Path $registration.BasePath -Root $_
+    }).Count -gt 0
+    if (-not $alreadyCovered) {
+        $targetRoots += $registration.BasePath
+    }
+}
+
 $targets = @(Get-VhdTargets -Registrations $registrations)
 
 if ($targets.Count -eq 0) {
