@@ -39,9 +39,42 @@ Then:
 | `setup-env.ps1` | Configures user or elevated environment variables and file associations. | Depends on the requested scope |
 | `setup-env-admin.ps1` | Applies machine-level registry and environment configuration. | Yes |
 | `functions.ps1` | Shared helper functions used by setup scripts. | Not run directly |
+| [`cleanup-temp.ps1`](./cleanup-temp.ps1) | Removes old files and empty directories from the current user's local Temp folder. | No |
 | [`wsl-analyse.ps1`](./wsl-analyse.ps1) | Produces a read-only WSL/VHDX disk-usage report. | No |
 | [`wsl-runner-status.ps1`](./wsl-runner-status.ps1) | Determines whether custom WSL GitHub Actions runners are idle, busy, offline, or unsafe to inspect. | No |
-| [`wsl-compact.ps1`](./wsl-compact.ps1) | Trims and compacts custom runner VHDXs, or all discovered WSL/Docker VHDXs in explicit full mode. | Yes |
+| [`wsl-compact.ps1`](./wsl-compact.ps1) | Trims and compacts custom runner VHDXs, or all discovered WSL/Docker VHDXs when no custom runners exist or `-All` is requested. | Yes |
+
+## User temp cleanup
+
+`cleanup-temp.ps1` cleans only the current user's `%LOCALAPPDATA%\Temp`
+folder. By default, it removes files last modified more than seven days ago and
+then removes old directories that are empty. It skips locked files and never
+traverses filesystem junctions or symbolic links.
+
+Preview the cleanup without changing anything:
+
+```powershell
+.\cleanup-temp.ps1 -ListOnly
+```
+
+Remove files older than the default seven days:
+
+```powershell
+.\cleanup-temp.ps1
+```
+
+Choose a different minimum age or inspect every proposed removal:
+
+```powershell
+.\cleanup-temp.ps1 -OlderThanDays 30
+.\cleanup-temp.ps1 -OlderThanDays 1 -WhatIf
+```
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `-OlderThanDays <0-3650>` | `7` | Remove files and empty directories whose last-write time is older than this age. |
+| `-ListOnly` | Off | Report candidate counts and estimated reclaimable bytes without deleting anything. |
+| `-WhatIf` | Off | Use PowerShell's standard per-item removal preview. |
 
 ## WSL storage maintenance
 
@@ -249,7 +282,7 @@ For automation, treat only exit code `0` as permission to enter a maintenance wi
 
 `wsl-compact.ps1` uses built-in `fstrim`, `wsl --shutdown`, and DiskPart `compact vdisk`. The Hyper-V PowerShell module and `Optimize-VHD` are not required.
 
-The default mode is designed for custom GitHub Actions runner VHDXs below `C:\WSL`. It:
+When custom GitHub Actions runner VHDXs exist below `C:\WSL`, the default mode:
 
 1. Checks every selected runner locally and through GitHub.
 2. Refuses the whole maintenance window if any runner is busy, under maintenance, or unknown.
@@ -264,6 +297,12 @@ The default mode is designed for custom GitHub Actions runner VHDXs below `C:\WS
 11. Reports before/after sizes and reclaimed space.
 
 An `fstrim` failure is nonfatal: compaction continues, but that VHDX may reclaim less space. Each trim operation has a 45-second timeout.
+
+When no WSL 2 distributions are registered below `RunnerRoot`, the script skips
+runner-specific checks and automatically continues with normal Docker and WSL
+VHDX discovery. This uses the same targets as `-All`, but always retains the
+interactive `COMPACT` confirmation because the whole-machine mode was selected
+implicitly. Use `-ListOnly` to preview this fallback without changing anything.
 
 ### Normal runner mode
 
@@ -309,7 +348,9 @@ This exact pair of switches bypasses runner activity probes, selects every regis
 
 ### Full Docker and WSL mode
 
-`-All` is the legacy whole-machine mode. It discovers VHDX files below:
+`-All` explicitly selects the legacy whole-machine mode, including on machines
+that have custom runners. On machines without custom runners, this mode is
+selected automatically. It discovers VHDX files below:
 
 - `%LOCALAPPDATA%\Docker`
 - `%LOCALAPPDATA%\wsl`
@@ -351,7 +392,7 @@ The `-DockerPrune` option invokes the Windows Docker CLI against its active cont
 | Parameter | Default | Meaning |
 |---|---|---|
 | `-DockerPrune <Ask|None|Standard|Volumes>` | `Ask` | In `-All` mode, optionally prune the active Windows Docker CLI context. `Standard` preserves volumes; `Volumes` removes unused volumes too. Ignored in normal runner mode. |
-| `-All` | Off | Use disruptive whole-machine discovery and compaction instead of runner-safe mode. |
+| `-All` | Off | Explicitly use disruptive whole-machine discovery and compaction instead of runner-safe mode. This mode is selected automatically when no custom runners exist. |
 | `-RunnerRoot <path>` | `C:\WSL` | Root containing custom runner WSL distributions. |
 | `-LocalOnly` | Off | Skip GitHub verification in normal runner mode. |
 | `-AllowWslShutdown` | Off | Authorize stopping Docker Desktop, every WSL distribution, and the shared utility VM in runner mode. |

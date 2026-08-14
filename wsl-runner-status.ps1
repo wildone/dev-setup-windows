@@ -547,7 +547,7 @@ foreach ($target in $targets | Sort-Object Name) {
 }
 
 if ($AsJson) {
-    $results | ConvertTo-Json -Depth 5
+    ConvertTo-Json -InputObject @($results) -Depth 5
 } else {
     $results |
         Select-Object Distro, Decision, SafeToCompact, Local, GitHub, Listener, Runner |
