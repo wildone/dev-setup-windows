@@ -11,7 +11,7 @@
     unknown, no compaction is attempted. When the complete fleet is idle and
     -AllowWslShutdown is supplied, runner filesystems are trimmed, keepalives are
     paused, the shared WSL 2 utility VM is shut down, runner VHDX files are
-    compacted, and previously running keepalives are restored. Pairing
+    compacted, and every enabled keepalive is restored and verified. Pairing
     -AllowWslShutdown with -Force deliberately overrides runner-state blockers
     and terminates active jobs.
 
@@ -673,17 +673,20 @@ function Suspend-RunnerKeepalive {
         return [PSCustomObject]@{
             TaskName = $taskName
             Found = $false
+            Enabled = $false
             WasRunning = $false
             Suspended = $true
             Error = ""
         }
     }
 
+    $enabled = [string]$task.State -ne "Disabled"
     $wasRunning = [string]$task.State -eq "Running"
     if (-not $wasRunning) {
         return [PSCustomObject]@{
             TaskName = $taskName
             Found = $true
+            Enabled = $enabled
             WasRunning = $false
             Suspended = $true
             Error = ""
@@ -697,6 +700,7 @@ function Suspend-RunnerKeepalive {
         return [PSCustomObject]@{
             TaskName = $taskName
             Found = $true
+            Enabled = $enabled
             WasRunning = $true
             Suspended = $false
             Error = $_.Exception.Message
@@ -710,6 +714,7 @@ function Suspend-RunnerKeepalive {
             return [PSCustomObject]@{
                 TaskName = $taskName
                 Found = $true
+                Enabled = $enabled
                 WasRunning = $true
                 Suspended = $true
                 Error = ""
@@ -721,6 +726,7 @@ function Suspend-RunnerKeepalive {
     return [PSCustomObject]@{
         TaskName = $taskName
         Found = $true
+        Enabled = $enabled
         WasRunning = $true
         Suspended = $false
         Error = "The scheduled task remained in the Running state for more than 15 seconds."
@@ -730,15 +736,30 @@ function Suspend-RunnerKeepalive {
 function Restore-RunnerKeepalive {
     param([Parameter(Mandatory = $true)]$KeepaliveState)
 
-    if (-not [bool]$KeepaliveState.Found -or -not [bool]$KeepaliveState.WasRunning) {
+    if (-not [bool]$KeepaliveState.Found -or -not [bool]$KeepaliveState.Enabled) {
         return $false
     }
 
     Write-Host " Restarting Windows keepalive task: $($KeepaliveState.TaskName)" -ForegroundColor Gray
     try {
-        Start-ScheduledTask -TaskName ([string]$KeepaliveState.TaskName) -ErrorAction Stop
-        Start-Sleep -Seconds 2
-        return $true
+        $taskName = [string]$KeepaliveState.TaskName
+        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+        if ([string]$task.State -ne "Running") {
+            Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+        }
+
+        $deadline = (Get-Date).AddSeconds(30)
+        do {
+            Start-Sleep -Seconds 1
+            $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+            if ([string]$task.State -eq "Running") {
+                return $true
+            }
+        } while ((Get-Date) -lt $deadline)
+
+        $script:HadFailures = $true
+        Write-Warning "Keepalive task '$taskName' did not remain running after restoration (state: $($task.State))."
+        return $false
     } catch {
         $script:HadFailures = $true
         Write-Warning "Could not restart '$($KeepaliveState.TaskName)': $($_.Exception.Message)"
@@ -916,8 +937,9 @@ function Invoke-IdleRunnerCompaction {
                 [void](Restore-RunnerKeepalive -KeepaliveState $keepaliveState)
             }
 
-            # Restore a runner that was initially online even if it had no
-            # running Windows keepalive task to restart.
+            # Restore a runner directly only when it has no enabled Windows
+            # keepalive task. Enabled keepalives are always restarted above,
+            # even if they were already stopped when maintenance began.
             $initiallyOnlineStatuses = if ($forceFleetShutdown) {
                 @($initialStatuses | Where-Object { $_.Decision -in @("IDLE", "BUSY", "FORCED") })
             } else {
@@ -927,7 +949,7 @@ function Invoke-IdleRunnerCompaction {
                 $state = $keepaliveStates |
                     Where-Object { $_.TaskName -eq "WSL Runner Autostart - $($status.Distro)" } |
                     Select-Object -First 1
-                if ($wslWasShutdown -and ($null -eq $state -or -not [bool]$state.WasRunning)) {
+                if ($wslWasShutdown -and ($null -eq $state -or -not [bool]$state.Enabled)) {
                     Start-WslDistribution -DistroName ([string]$status.Distro)
                 }
             }
@@ -950,10 +972,11 @@ function Invoke-IdleRunnerCompaction {
         exit 1
     }
 
-    # Confirm that all runner keepalive tasks which were previously running
-    # were restored before reporting success.
+    # Confirm that every enabled runner keepalive was restored before reporting
+    # success. A Ready task does not supervise its wsl.exe child and can leave a
+    # runner vulnerable to silently stopping later.
     if (-not $NoRestartRunners) {
-        foreach ($state in $keepaliveStates | Where-Object { [bool]$_.WasRunning }) {
+        foreach ($state in $keepaliveStates | Where-Object { [bool]$_.Found -and [bool]$_.Enabled }) {
             $task = Get-ScheduledTask -TaskName ([string]$state.TaskName) -ErrorAction SilentlyContinue
             if ($null -eq $task -or [string]$task.State -ne "Running") {
                 $script:HadFailures = $true
