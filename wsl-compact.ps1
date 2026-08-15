@@ -15,9 +15,12 @@
     -AllowWslShutdown with -Force deliberately overrides runner-state blockers
     and terminates active jobs.
 
-    Use -All to request the original disruptive behavior: prune Docker Desktop
-    as requested, stop Docker Desktop and every WSL distribution, and compact all
-    VHDX files below the Docker, WSL, and RunnerRoot folders.
+    When no WSL 2 distributions are registered below RunnerRoot, runner checks
+    are skipped and the script falls back to normal Docker and WSL VHDX
+    discovery. Use -All to request this whole-machine behavior explicitly even
+    when custom runners exist: prune Docker Desktop as requested, stop Docker
+    Desktop and every WSL distribution, and compact all VHDX files below the
+    Docker, WSL, and RunnerRoot folders.
 
     Uses Windows' built-in WSL and DiskPart tools, so Optimize-VHD and the Hyper-V
     PowerShell module are not required. Run from an elevated Windows PowerShell
@@ -29,9 +32,11 @@
     This option is used only with -All.
 
 .PARAMETER All
-    Uses the original full-compaction mode, which stops Docker Desktop and every
-    WSL distribution. Without this switch, runner VHDX compaction proceeds only
-    when every custom runner is verified idle or offline.
+    Explicitly uses the original full-compaction mode, which stops Docker Desktop
+    and every WSL distribution. Without this switch, runner VHDX compaction
+    proceeds only when every custom runner is verified idle or offline. Machines
+    with no custom runners automatically fall back to full-compaction mode with
+    an interactive confirmation.
 
 .PARAMETER RunnerRoot
     Windows folder containing custom runner WSL distributions. Default: C:\WSL.
@@ -90,7 +95,11 @@ $ErrorActionPreference = "Stop"
 $dockerRoot = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "Docker"
 $wslRoot = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "wsl"
 $runnerRootNormal = [System.IO.Path]::GetFullPath(($RunnerRoot -replace '^\\\\\?\\', '')).TrimEnd('\')
-$targetRoots = @($dockerRoot, $wslRoot, $runnerRootNormal) | Select-Object -Unique
+$targetRoots = @($dockerRoot, $wslRoot)
+if (Test-Path -LiteralPath $runnerRootNormal -PathType Container) {
+    $targetRoots += $runnerRootNormal
+}
+$targetRoots = @($targetRoots | Select-Object -Unique)
 $script:DockerExe = $null
 $script:HadFailures = $false
 $script:HadWarnings = $false
@@ -219,6 +228,8 @@ function Test-DockerEngine {
 }
 
 function Assert-Dependencies {
+    param([switch]$RunnerMode)
+
     Write-Step "Checking required Windows tools..."
 
     foreach ($commandName in @("wsl.exe", "diskpart.exe")) {
@@ -228,14 +239,7 @@ function Assert-Dependencies {
         Write-Host " Found: $commandName" -ForegroundColor DarkGray
     }
 
-    if ($All) {
-        $script:DockerExe = Find-DockerExecutable
-        if ($null -ne $script:DockerExe) {
-            Write-Host " Found: Docker CLI ($script:DockerExe)" -ForegroundColor DarkGray
-        } else {
-            Write-Warning "Docker CLI was not found. Docker pruning and graceful Docker Desktop restart will be unavailable."
-        }
-    } else {
+    if ($RunnerMode) {
         $statusScript = Join-Path $PSScriptRoot "wsl-runner-status.ps1"
         if (-not (Test-Path -LiteralPath $statusScript -PathType Leaf)) {
             throw "Required runner status script was not found: $statusScript"
@@ -254,6 +258,13 @@ function Assert-Dependencies {
             Write-Host " Found: Docker CLI ($script:DockerExe)" -ForegroundColor DarkGray
         } elseif ($null -ne (Get-Process -Name "Docker Desktop" -ErrorAction SilentlyContinue)) {
             throw "Docker Desktop is running but docker.exe was not found, so it cannot be stopped and restarted safely."
+        }
+    } else {
+        $script:DockerExe = Find-DockerExecutable
+        if ($null -ne $script:DockerExe) {
+            Write-Host " Found: Docker CLI ($script:DockerExe)" -ForegroundColor DarkGray
+        } else {
+            Write-Warning "Docker CLI was not found. Docker pruning and graceful Docker Desktop restart will be unavailable."
         }
     }
 }
@@ -569,18 +580,30 @@ function Invoke-RunnerStatusCheck {
             ""
         }
 
+        $jsonText = [string]$json
+        $stderrText = [string]$stderr
+        if ([string]::IsNullOrWhiteSpace($jsonText)) {
+            $details = @($stderrText.Trim()) | Where-Object { $_ }
+            throw "Runner status check failed with exit code $statusExitCode and returned no JSON.`n$($details -join "`n")"
+        }
+
         try {
-            $parsed = $json | ConvertFrom-Json
+            $parsed = $jsonText | ConvertFrom-Json
         } catch {
-            $details = @($json.Trim(), $stderr.Trim()) | Where-Object { $_ }
+            $details = @($jsonText.Trim(), $stderrText.Trim()) | Where-Object { $_ }
             throw "Runner status check failed with exit code $statusExitCode and did not return valid JSON.`n$($details -join "`n")"
         }
 
-        if (-not [string]::IsNullOrWhiteSpace($stderr)) {
-            Write-Verbose ("Runner status stderr: {0}" -f $stderr.Trim())
+        $parsedStatuses = @($parsed)
+        if ($parsedStatuses.Count -eq 0) {
+            throw "Runner status check returned an empty status set. No compaction was attempted."
         }
 
-        return @($parsed)
+        if (-not [string]::IsNullOrWhiteSpace($stderrText)) {
+            Write-Verbose ("Runner status stderr: {0}" -f $stderrText.Trim())
+        }
+
+        return $parsedStatuses
     } finally {
         Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
     }
@@ -1008,11 +1031,22 @@ Write-Host "==============================================" -ForegroundColor Cya
 Write-Host " WSL + DOCKER VHDX CLEANUP AND COMPACTION" -ForegroundColor Cyan
 Write-Host "==============================================" -ForegroundColor Cyan
 
-Assert-Dependencies
 $registrations = @(Get-WslRegistrations)
+$runnerRegistrations = @($registrations | Where-Object {
+    $_.Version -eq 2 -and (Test-PathWithinRoot -Path $_.BasePath -Root $runnerRootNormal)
+})
+$usingRunnerMode = (-not $All) -and $runnerRegistrations.Count -gt 0
+$implicitFullMode = (-not $All) -and (-not $usingRunnerMode)
 
-if (-not $All) {
-    Invoke-IdleRunnerCompaction -Registrations $registrations
+Assert-Dependencies -RunnerMode:$usingRunnerMode
+
+if ($usingRunnerMode) {
+    Invoke-IdleRunnerCompaction -Registrations $runnerRegistrations
+}
+
+if ($implicitFullMode) {
+    Write-Step "No custom runner distributions were found below '$runnerRootNormal'; runner checks were skipped."
+    Write-Host " Continuing with normal WSL and Docker VHDX discovery." -ForegroundColor Gray
 }
 
 # Full mode also includes registered distributions stored outside the standard
@@ -1056,7 +1090,7 @@ if ($ListOnly) {
     exit 0
 }
 
-if (-not $Force) {
+if ((-not $Force) -or $implicitFullMode) {
     $confirmation = Read-Host "`nThis will stop Docker Desktop and every WSL distro. Type COMPACT to continue"
     if ($confirmation -cne "COMPACT") {
         Write-Host "Cancelled; no changes were made." -ForegroundColor Yellow
