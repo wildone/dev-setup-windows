@@ -11,7 +11,9 @@
     unknown, no compaction is attempted. When the complete fleet is idle and
     -AllowWslShutdown is supplied, runner filesystems are trimmed, keepalives are
     paused, the shared WSL 2 utility VM is shut down, runner VHDX files are
-    compacted, and every enabled keepalive is restored and verified. Pairing
+    compacted with bounded parallel DiskPart jobs, and every enabled keepalive is
+    restored and verified. Docker's startup hooks and service mode are disabled
+    only for the maintenance window and restored in a finally block. Pairing
     -AllowWslShutdown with -Force deliberately overrides runner-state blockers
     and terminates active jobs.
 
@@ -61,6 +63,11 @@
     Does not restart idle runner distributions or their Windows keepalive tasks
     after compaction. Scheduled tasks remain enabled for a future trigger.
 
+.PARAMETER ThrottleLimit
+    Maximum number of VHDX files compacted concurrently. Default: 2. Use 1 for
+    the previous sequential behavior. Values above 4 are rejected to avoid
+    excessive DiskPart and storage contention.
+
 .EXAMPLE
     .\wsl-compact.ps1 -ListOnly
 
@@ -86,6 +93,8 @@ param(
     [switch]$Force,
     [switch]$NoRestartDocker,
     [switch]$NoRestartRunners,
+    [ValidateRange(1, 4)]
+    [int]$ThrottleLimit = 2,
     [switch]$ListOnly
 )
 
@@ -458,6 +467,169 @@ function Stop-DockerDesktopForCompaction {
             Write-Warning "Docker Desktop CLI stop failed; WSL shutdown will still stop its WSL VM."
         }
     }
+
+    $service = Get-Service -Name "com.docker.service" -ErrorAction SilentlyContinue
+    if ($null -ne $service) {
+        if ($service.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Stopped) {
+            Stop-Service -Name $service.Name -Force -ErrorAction Stop
+            $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped, [timespan]::FromSeconds(30))
+        }
+        Set-Service -Name $service.Name -StartupType Disabled
+    }
+
+    $dockerProcessNames = @("Docker Desktop", "com.docker.backend", "com.docker.build", "com.docker.proxy", "docker-agent", "vpnkit")
+    Get-Process -Name $dockerProcessNames -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+}
+
+function Get-DockerStartupState {
+    $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+    $runValueName = "Docker Desktop"
+    $runKeyItem = Get-Item -LiteralPath $runKey -ErrorAction SilentlyContinue
+    $runValuePresent = $null -ne $runKeyItem -and $runKeyItem.GetValueNames() -contains $runValueName
+    $settingsPath = Join-Path ([Environment]::GetFolderPath("ApplicationData")) "Docker\settings-store.json"
+    $autoStartFound = $false
+    $autoStartValue = $false
+
+    if (Test-Path -LiteralPath $settingsPath -PathType Leaf) {
+        $settingsText = [System.IO.File]::ReadAllText($settingsPath)
+        $autoStartMatch = [regex]::Match($settingsText, '(?im)"AutoStart"\s*:\s*(true|false)')
+        if ($autoStartMatch.Success) {
+            $autoStartFound = $true
+            $autoStartValue = [bool]::Parse($autoStartMatch.Groups[1].Value)
+        }
+    }
+
+    $service = Get-CimInstance Win32_Service -Filter "Name='com.docker.service'" -ErrorAction SilentlyContinue
+    return [pscustomobject]@{
+        RunKey = $runKey
+        RunValueName = $runValueName
+        RunValuePresent = $runValuePresent
+        RunValue = if ($runValuePresent) { $runKeyItem.GetValue($runValueName, $null, 'DoNotExpandEnvironmentNames') } else { $null }
+        RunValueKind = if ($runValuePresent) { $runKeyItem.GetValueKind($runValueName).ToString() } else { "String" }
+        SettingsPath = $settingsPath
+        AutoStartFound = $autoStartFound
+        AutoStartValue = $autoStartValue
+        ServicePresent = $null -ne $service
+        ServiceStartMode = if ($null -ne $service) { [string]$service.StartMode } else { "" }
+        ServiceWasRunning = $null -ne $service -and $service.State -eq "Running"
+    }
+}
+
+function Set-DockerAutoStartSetting {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][bool]$Enabled
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return
+    }
+
+    $settingsText = [System.IO.File]::ReadAllText($Path)
+    $autoStartMatch = [regex]::Match($settingsText, '(?im)("AutoStart"\s*:\s*)(true|false)')
+    if (-not $autoStartMatch.Success) {
+        return
+    }
+
+    $literal = if ($Enabled) { "true" } else { "false" }
+    $valueGroup = $autoStartMatch.Groups[2]
+    $updatedText = $settingsText.Substring(0, $valueGroup.Index) + $literal +
+        $settingsText.Substring($valueGroup.Index + $valueGroup.Length)
+    if ($updatedText -cne $settingsText) {
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($Path, $updatedText, $utf8NoBom)
+    }
+}
+
+function Disable-DockerStartupForCompaction {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [switch]$Quiet
+    )
+
+    if (-not $Quiet) {
+        Write-Step "Temporarily disabling Docker Desktop startup during maintenance..."
+    }
+    if ([bool]$State.RunValuePresent) {
+        $runKeyItem = Get-Item -LiteralPath $State.RunKey -ErrorAction SilentlyContinue
+        if ($null -ne $runKeyItem -and $runKeyItem.GetValueNames() -contains $State.RunValueName) {
+            Remove-ItemProperty -LiteralPath $State.RunKey -Name $State.RunValueName -ErrorAction Stop
+        }
+    }
+    if ([bool]$State.AutoStartFound) {
+        Set-DockerAutoStartSetting -Path $State.SettingsPath -Enabled $false
+    }
+}
+
+function Restore-DockerStartupAfterCompaction {
+    param([Parameter(Mandatory = $true)]$State)
+
+    Write-Step "Restoring Docker Desktop startup settings..."
+    $restoreErrors = New-Object 'System.Collections.Generic.List[string]'
+
+    try {
+        if ([bool]$State.RunValuePresent) {
+            New-ItemProperty -LiteralPath $State.RunKey -Name $State.RunValueName `
+                -Value $State.RunValue -PropertyType $State.RunValueKind -Force | Out-Null
+        } else {
+            Remove-ItemProperty -LiteralPath $State.RunKey -Name $State.RunValueName -ErrorAction SilentlyContinue
+        }
+    } catch {
+        [void]$restoreErrors.Add("login Run value: $($_.Exception.Message)")
+    }
+
+    try {
+        if ([bool]$State.AutoStartFound) {
+            Set-DockerAutoStartSetting -Path $State.SettingsPath -Enabled ([bool]$State.AutoStartValue)
+        }
+    } catch {
+        [void]$restoreErrors.Add("AutoStart preference: $($_.Exception.Message)")
+    }
+
+    try {
+        if ([bool]$State.ServicePresent) {
+            $currentService = Get-CimInstance Win32_Service -Filter "Name='com.docker.service'" -ErrorAction SilentlyContinue
+            $startupType = switch ($State.ServiceStartMode) {
+                "Auto" { "Automatic" }
+                "Disabled" { "Disabled" }
+                default { "Manual" }
+            }
+            if ($null -ne $currentService -and $currentService.StartMode -ne $State.ServiceStartMode) {
+                Set-Service -Name "com.docker.service" -StartupType $startupType
+            }
+        }
+    } catch {
+        [void]$restoreErrors.Add("service startup mode: $($_.Exception.Message)")
+    }
+
+    if ($restoreErrors.Count -gt 0) {
+        throw "Docker startup restoration was incomplete: $($restoreErrors -join '; ')"
+    }
+}
+
+function Assert-DockerStoppedForCompaction {
+    Start-Sleep -Seconds 3
+    $dockerProcessNames = @("Docker Desktop", "com.docker.backend", "com.docker.build", "com.docker.proxy", "docker-agent", "vpnkit")
+    $remainingProcesses = @(Get-Process -Name $dockerProcessNames -ErrorAction SilentlyContinue)
+    $service = Get-Service -Name "com.docker.service" -ErrorAction SilentlyContinue
+    $runningDistros = @(& wsl.exe --list --running --quiet 2>$null | ForEach-Object { ([string]$_).Trim() })
+
+    if ($remainingProcesses.Count -gt 0 -or
+        ($null -ne $service -and $service.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Stopped) -or
+        $runningDistros -contains "docker-desktop") {
+        $details = @()
+        if ($remainingProcesses.Count -gt 0) {
+            $details += "processes=$((($remainingProcesses | Select-Object -ExpandProperty ProcessName -Unique) -join ','))"
+        }
+        if ($null -ne $service -and $service.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Stopped) {
+            $details += "service=$($service.Status)"
+        }
+        if ($runningDistros -contains "docker-desktop") {
+            $details += "distro=docker-desktop"
+        }
+        throw "Docker restarted during the maintenance shutdown ($($details -join '; ')). No compaction was started."
+    }
 }
 
 function Stop-WslForCompaction {
@@ -471,60 +643,163 @@ function Stop-WslForCompaction {
 }
 
 function Stop-DockerAndWsl {
+    param([Parameter(Mandatory = $true)]$StartupState)
+
     Write-Step "Stopping Docker Desktop and WSL to release VHDX handles..."
+    Disable-DockerStartupForCompaction -State $StartupState
     Stop-DockerDesktopForCompaction
+    Disable-DockerStartupForCompaction -State $StartupState -Quiet
     Stop-WslForCompaction
+    Assert-DockerStoppedForCompaction
 }
 
-function Compact-VhdWithDiskPart {
-    param([Parameter(Mandatory = $true)][string]$Path)
+$script:CompactVhdWorker = {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][int]$Index
+    )
 
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        throw "VHDX disappeared before compaction: $Path"
-    }
+    $ErrorActionPreference = "Stop"
+    $before = [int64]0
 
-    $file = Get-Item -LiteralPath $Path -Force
-    if (($file.Attributes -band [System.IO.FileAttributes]::SparseFile) -ne 0) {
-        throw "VHDX is marked as an NTFS sparse file and was skipped to avoid unsafe conversion: $Path"
-    }
+    try {
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+            throw "VHDX disappeared before compaction: $Path"
+        }
 
-    $escapedPath = $Path.Replace('"', '""')
-    $lastFailure = $null
+        $file = Get-Item -LiteralPath $Path -Force
+        $before = [int64]$file.Length
+        if (($file.Attributes -band [System.IO.FileAttributes]::SparseFile) -ne 0) {
+            throw "VHDX is marked as an NTFS sparse file and was skipped to avoid unsafe conversion: $Path"
+        }
 
-    for ($attempt = 1; $attempt -le 3; $attempt++) {
-        $diskPartScript = Join-Path $env:TEMP ("wsl-compact-{0}.txt" -f ([guid]::NewGuid().ToString("N")))
+        $escapedPath = $Path.Replace('"', '""')
+        $lastFailure = $null
 
-        try {
-            @(
-                "select vdisk file=`"$escapedPath`""
-                "compact vdisk"
-                "exit"
-            ) | Set-Content -LiteralPath $diskPartScript -Encoding ASCII
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            $diskPartScript = Join-Path $env:TEMP ("wsl-compact-{0}.txt" -f ([guid]::NewGuid().ToString("N")))
 
-            $output = & diskpart.exe /s $diskPartScript 2>&1
-            $exitCode = $LASTEXITCODE
-            $outputText = ($output | Out-String).Trim()
+            try {
+                @(
+                    "select vdisk file=`"$escapedPath`""
+                    "compact vdisk"
+                    "exit"
+                ) | Set-Content -LiteralPath $diskPartScript -Encoding ASCII
 
-            $hasError = $exitCode -ne 0 -or
-                $outputText -match '(?im)DiskPart has encountered an error|Virtual Disk Service error|The system cannot find|is not valid|failed'
-            $hasSuccess = $outputText -match '(?im)successfully compacted'
+                $output = & diskpart.exe /s $diskPartScript 2>&1
+                $exitCode = $LASTEXITCODE
+                $outputText = ($output | Out-String).Trim()
 
-            if (-not $hasError -and $hasSuccess) {
-                return
+                $hasError = $exitCode -ne 0 -or
+                    $outputText -match '(?im)DiskPart has encountered an error|Virtual Disk Service error|The system cannot find|is not valid|failed'
+                $hasSuccess = $outputText -match '(?im)successfully compacted'
+
+                if (-not $hasError -and $hasSuccess) {
+                    $after = [int64](Get-Item -LiteralPath $Path -Force).Length
+                    return [pscustomobject]@{
+                        Index = $Index
+                        Path = $Path
+                        Success = $true
+                        Before = $before
+                        After = $after
+                        Reclaimed = [math]::Max([int64]0, ($before - $after))
+                        Error = ""
+                    }
+                }
+
+                $lastFailure = "DiskPart failed for '$Path' on attempt $attempt.`n$outputText"
+            } finally {
+                Remove-Item -LiteralPath $diskPartScript -Force -ErrorAction SilentlyContinue
             }
 
-            $lastFailure = "DiskPart failed for '$Path' on attempt $attempt.`n$outputText"
-        } finally {
-            Remove-Item -LiteralPath $diskPartScript -Force -ErrorAction SilentlyContinue
+            if ($attempt -lt 3) {
+                Start-Sleep -Seconds 2
+            }
         }
 
-        if ($attempt -lt 3) {
-            Write-Host "  DiskPart did not complete; retrying in 2 seconds..." -ForegroundColor Yellow
-            Start-Sleep -Seconds 2
+        throw $lastFailure
+    } catch {
+        return [pscustomobject]@{
+            Index = $Index
+            Path = $Path
+            Success = $false
+            Before = $before
+            After = $before
+            Reclaimed = [int64]0
+            Error = $_.Exception.Message
+        }
+    }
+}
+
+function Invoke-VhdCompactions {
+    param(
+        [Parameter(Mandatory = $true)][array]$Targets,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 4)][int]$MaxConcurrency
+    )
+
+    $results = New-Object 'System.Collections.Generic.List[object]'
+
+    if ($MaxConcurrency -eq 1 -or $Targets.Count -eq 1) {
+        for ($index = 0; $index -lt $Targets.Count; $index++) {
+            $path = [string]$Targets[$index].Path
+            Write-Host (" Compacting [{0}/{1}]: {2}" -f ($index + 1), $Targets.Count, $path) -ForegroundColor Gray
+            [void]$results.Add((& $script:CompactVhdWorker -Path $path -Index $index))
+        }
+
+        return $results.ToArray()
+    }
+
+    Write-Host (" Running up to {0} DiskPart compactions concurrently." -f $MaxConcurrency) -ForegroundColor Gray
+    $running = New-Object 'System.Collections.Generic.List[object]'
+    $jobMetadata = @{}
+    $nextIndex = 0
+
+    try {
+        while ($nextIndex -lt $Targets.Count -or $running.Count -gt 0) {
+            while ($nextIndex -lt $Targets.Count -and $running.Count -lt $MaxConcurrency) {
+                $path = [string]$Targets[$nextIndex].Path
+                Write-Host (" Starting [{0}/{1}]: {2}" -f ($nextIndex + 1), $Targets.Count, $path) -ForegroundColor Gray
+                $job = Start-Job -ScriptBlock $script:CompactVhdWorker -ArgumentList $path, $nextIndex
+                [void]$running.Add($job)
+                $jobMetadata[$job.Id] = [pscustomobject]@{ Index = $nextIndex; Path = $path }
+                $nextIndex++
+            }
+
+            $finished = Wait-Job -Job $running.ToArray() -Any
+            $metadata = $jobMetadata[$finished.Id]
+            $jobOutput = @(Receive-Job -Job $finished -ErrorAction SilentlyContinue)
+            $result = $jobOutput | Where-Object { $_.PSObject.Properties.Name -contains 'Success' } | Select-Object -Last 1
+
+            if ($null -eq $result) {
+                $reason = if ($null -ne $finished.ChildJobs[0].JobStateInfo.Reason) {
+                    $finished.ChildJobs[0].JobStateInfo.Reason.Message
+                } else {
+                    "Background compaction job ended in state '$($finished.State)'."
+                }
+                $result = [pscustomobject]@{
+                    Index = $metadata.Index
+                    Path = $metadata.Path
+                    Success = $false
+                    Before = [int64]0
+                    After = [int64]0
+                    Reclaimed = [int64]0
+                    Error = $reason
+                }
+            }
+
+            [void]$results.Add($result)
+            [void]$running.Remove($finished)
+            $jobMetadata.Remove($finished.Id)
+            Remove-Job -Job $finished -Force -ErrorAction SilentlyContinue
+        }
+    } finally {
+        foreach ($job in $running.ToArray()) {
+            Stop-Job -Job $job -ErrorAction SilentlyContinue
+            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
         }
     }
 
-    throw $lastFailure
+    return @($results | Sort-Object Index)
 }
 
 function Start-DockerDesktop {
@@ -872,6 +1147,7 @@ function Invoke-IdleRunnerCompaction {
     $dockerWasRunning = $null -ne (Get-Process -Name "Docker Desktop" -ErrorAction SilentlyContinue)
     $shouldRestartDocker = $dockerWasRunning -and (-not $NoRestartDocker)
     $dockerStopAttempted = $false
+    $dockerStartupState = $null
     $wslWasShutdown = $false
     $abortMessage = ""
 
@@ -912,10 +1188,11 @@ function Invoke-IdleRunnerCompaction {
         }
 
         if ([string]::IsNullOrWhiteSpace($abortMessage)) {
-            if ($dockerWasRunning) {
-                Stop-DockerDesktopForCompaction
-                $dockerStopAttempted = $true
-            }
+            $dockerStartupState = Get-DockerStartupState
+            Disable-DockerStartupForCompaction -State $dockerStartupState
+            Stop-DockerDesktopForCompaction
+            Disable-DockerStartupForCompaction -State $dockerStartupState -Quiet
+            $dockerStopAttempted = $true
 
             Write-Step "Final runner check before shared WSL shutdown..."
             if ($forceFleetShutdown) {
@@ -933,21 +1210,19 @@ function Invoke-IdleRunnerCompaction {
         if ([string]::IsNullOrWhiteSpace($abortMessage)) {
             Stop-WslForCompaction
             $wslWasShutdown = $true
+            Assert-DockerStoppedForCompaction
 
             Write-Step "Compacting runner VHDX files with the shared WSL VM stopped..."
-            foreach ($target in $targets) {
-                Write-Host " Compacting: $($target.Path)" -ForegroundColor Gray
-                try {
-                    $before = [int64](Get-Item -LiteralPath $target.Path -Force).Length
-                    Compact-VhdWithDiskPart -Path $target.Path
-                    $after = [int64](Get-Item -LiteralPath $target.Path -Force).Length
-                    $saved = [math]::Max([int64]0, ($before - $after))
+            $compactionResults = @(Invoke-VhdCompactions -Targets $targets -MaxConcurrency $ThrottleLimit)
+            foreach ($result in $compactionResults) {
+                if ([bool]$result.Success) {
                     $compactedCount++
-                    Write-Host ("  Before: {0}; after: {1}; reclaimed: {2}" -f
-                        (Format-GB $before), (Format-GB $after), (Format-GB $saved)) -ForegroundColor Green
-                } catch {
+                    Write-Host ("  Completed: {0}`n   Before: {1}; after: {2}; reclaimed: {3}" -f
+                        $result.Path, (Format-GB $result.Before), (Format-GB $result.After),
+                        (Format-GB $result.Reclaimed)) -ForegroundColor Green
+                } else {
                     $script:HadFailures = $true
-                    Write-Host "  ERROR: $($_.Exception.Message)" -ForegroundColor Red
+                    Write-Host ("  ERROR compacting {0}: {1}" -f $result.Path, $result.Error) -ForegroundColor Red
                 }
             }
         } else {
@@ -976,6 +1251,10 @@ function Invoke-IdleRunnerCompaction {
                     Start-WslDistribution -DistroName ([string]$status.Distro)
                 }
             }
+        }
+
+        if ($null -ne $dockerStartupState) {
+            Restore-DockerStartupAfterCompaction -State $dockerStartupState
         }
 
         if ($shouldRestartDocker -and ($dockerStopAttempted -or $wslWasShutdown)) {
@@ -1101,6 +1380,7 @@ if ((-not $Force) -or $implicitFullMode) {
 $dockerWasRunning = ($null -ne (Get-Process -Name "Docker Desktop" -ErrorAction SilentlyContinue))
 
 $shouldRestartDocker = $dockerWasRunning -and (-not $NoRestartDocker)
+$dockerStartupState = $null
 
 try {
     Write-Step "Cleaning filesystems before compaction..."
@@ -1121,23 +1401,26 @@ try {
         Invoke-WslTrim -DistroName $dockerDistro.Name
     }
 
-    Stop-DockerAndWsl
+    $dockerStartupState = Get-DockerStartupState
+    Stop-DockerAndWsl -StartupState $dockerStartupState
 
     Write-Step "Compacting all discovered VHDX files..."
-    foreach ($target in $targets) {
-        Write-Host " Compacting: $($target.Path)" -ForegroundColor Gray
-        try {
-            Compact-VhdWithDiskPart -Path $target.Path
-            $after = [int64](Get-Item -LiteralPath $target.Path -Force).Length
-            $saved = [math]::Max([int64]0, ($target.Before - $after))
-            Write-Host ("  Before: {0}; after: {1}; reclaimed: {2}" -f
-                (Format-GB $target.Before), (Format-GB $after), (Format-GB $saved)) -ForegroundColor Green
-        } catch {
+    $compactionResults = @(Invoke-VhdCompactions -Targets $targets -MaxConcurrency $ThrottleLimit)
+    foreach ($result in $compactionResults) {
+        if ([bool]$result.Success) {
+            Write-Host ("  Completed: {0}`n   Before: {1}; after: {2}; reclaimed: {3}" -f
+                $result.Path, (Format-GB $result.Before), (Format-GB $result.After),
+                (Format-GB $result.Reclaimed)) -ForegroundColor Green
+        } else {
             $script:HadFailures = $true
-            Write-Host "  ERROR: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host ("  ERROR compacting {0}: {1}" -f $result.Path, $result.Error) -ForegroundColor Red
         }
     }
 } finally {
+    if ($null -ne $dockerStartupState) {
+        Restore-DockerStartupAfterCompaction -State $dockerStartupState
+    }
+
     if ($shouldRestartDocker) {
         Start-DockerDesktop
     }

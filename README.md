@@ -289,11 +289,11 @@ When custom GitHub Actions runner VHDXs exist below `C:\WSL`, the default mode:
 3. Runs `fstrim` in the selected runner distributions.
 4. Rechecks the complete runner fleet.
 5. Pauses matching `WSL Runner Autostart - <distro>` scheduled tasks.
-6. Stops Docker Desktop if it was running.
+6. Records and temporarily disables Docker Desktop's login setting, then stops its CLI, service, and processes.
 7. Performs a final runner check.
-8. Runs `wsl --shutdown` to detach every WSL 2 VHDX.
-9. Compacts each selected runner VHDX with DiskPart.
-10. Restores previously running runner keepalives and Docker Desktop.
+8. Runs `wsl --shutdown` and verifies Docker stayed stopped before touching any VHDX.
+9. Compacts selected runner VHDXs with up to two concurrent DiskPart jobs by default.
+10. Restores the exact Docker startup/service settings captured at entry, then restores previously running runner keepalives and Docker Desktop.
 11. Reports before/after sizes and reclaimed space.
 
 An `fstrim` failure is nonfatal: compaction continues, but that VHDX may reclaim less space. Each trim operation has a 45-second timeout.
@@ -345,6 +345,8 @@ Force the complete custom-runner maintenance window:
 This exact pair of switches bypasses runner activity probes, selects every registered WSL 2 runner below `RunnerRoot`, pauses its keepalive task, and shuts down the shared WSL VM. Active job attempts are interrupted; configured retry automation can reschedule them after the runners return.
 
 `-Force` by itself does not override busy runners and does not authorize WSL shutdown.
+
+Compaction concurrency is bounded with `-ThrottleLimit`. The default of `2` can reduce elapsed time when several VHDXs are selected. Use `-ThrottleLimit 1` for sequential behavior, or raise it to at most `4` when the storage can sustain the additional I/O. More concurrency is not necessarily faster when every VHDX is on the same physical disk.
 
 ### Full Docker and WSL mode
 
@@ -399,7 +401,10 @@ The `-DockerPrune` option invokes the Windows Docker CLI against its active cont
 | `-Force` | Off | Skip confirmation. Paired with `-AllowWslShutdown`, also bypass runner activity probes and include every registered runner below `RunnerRoot`. |
 | `-NoRestartDocker` | Off | Do not restart Docker Desktop if the script stopped it. |
 | `-NoRestartRunners` | Off | Do not restart runner distributions or previously running keepalive tasks after runner-mode compaction. |
+| `-ThrottleLimit <1-4>` | `2` | Maximum number of VHDX files compacted concurrently. Use `1` for the previous sequential behavior. |
 | `-ListOnly` | Off | Display target/readiness information without trimming, stopping, pruning, or compacting. |
+
+Docker startup suppression is temporary and exception-safe: the script restores the login Run value, Docker's `AutoStart` preference, and the `com.docker.service` startup mode in `finally`. `-NoRestartDocker` controls whether a previously running Docker Desktop process is relaunched; it does not leave those startup settings disabled.
 
 The script exits `1` after a fatal dependency, shutdown, compaction, or restoration failure. List-only checks, user cancellation, missing shutdown authorization, and safety blocks are intentional no-ops and can exit `0`; always read the displayed result instead of relying only on the exit code.
 
