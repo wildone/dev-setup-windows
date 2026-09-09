@@ -586,9 +586,15 @@ Restored runners may immediately accept queued jobs and create images, build cac
 
 ### MAXBARRASS-WORK configuration
 
-The checked-in `cleanup-locations.json` targets this PC's `D:\projects` layout
+The separate `cleanup-locations.MAXBARRASS-WORK.json` targets this PC's `D:\projects` layout
 and verified pnpm (`D:\.pnpm-store\v10`), npm and pip cache paths. Run the
-list-only command above from this checkout before every cleanup. The
+machine-specific preview below from this checkout before every cleanup.
+
+```powershell
+.\cleanup-temp.ps1 -ConfigPath .\cleanup-locations.MAXBARRASS-WORK.json -ListOnly
+```
+
+The original `cleanup-locations.json` remains available for the other PCs. The
 `computerName` field is descriptive metadata, not an enforced machine lock.
 
 Cargo locations select only `target`, `target-*`, `c2-target`, `c2-target-*`,

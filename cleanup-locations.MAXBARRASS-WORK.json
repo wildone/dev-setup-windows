@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "computerName": "MAXBARRASS-WORK",
+  "description": "MAXBARRASS-WORK: verified cache paths and explicitly named Cargo build directories. Seven-day inactivity for directory cleanup. No whole-worktree, evidence, recovery, WSL or Docker storage deletion. computerName is descriptive; the script does not enforce a machine binding.",
+  "worktreeLeaseFile": "cleanup-worktree-leases.json",
+  "locations": [
+    {
+      "id": "ontograph-primary-cargo",
+      "kind": "cargo-target-root",
+      "path": "D:\\projects\\governance-foundation\\ontograph",
+      "repository": "D:\\projects\\governance-foundation\\ontograph",
+      "minimumInactiveMinutes": 10080,
+      "includeNamePatterns": [
+        "target"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "ontograph-temp-cargo",
+      "kind": "cargo-target-root",
+      "path": "D:\\projects\\governance-foundation\\ontograph\\.tmp",
+      "repository": "D:\\projects\\governance-foundation\\ontograph",
+      "minimumInactiveMinutes": 10080,
+      "includeNamePatterns": [
+        "target-*",
+        "c2-target",
+        "c2-target-*"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "ontograph-external-cargo",
+      "kind": "cargo-target-root",
+      "path": "D:\\projects\\ontograph-cargo-target",
+      "repository": "D:\\projects\\governance-foundation\\ontograph",
+      "minimumInactiveMinutes": 10080,
+      "includeNamePatterns": [
+        "issue-*"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "ontograph-external-cargo-targets",
+      "kind": "cargo-target-root",
+      "path": "D:\\projects\\ontograph-cargo-targets",
+      "repository": "D:\\projects\\governance-foundation\\ontograph",
+      "minimumInactiveMinutes": 10080,
+      "includeNamePatterns": [
+        "issue-*"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "pnpm-active-store",
+      "kind": "package-cache",
+      "tool": "pnpm",
+      "path": "D:\\.pnpm-store\\v10",
+      "enabled": true
+    },
+    {
+      "id": "pnpm-obsolete-stores",
+      "kind": "pnpm-store-root",
+      "tool": "pnpm",
+      "path": "D:\\.pnpm-store",
+      "minimumInactiveMinutes": 10080,
+      "enabled": true
+    },
+    {
+      "id": "npm-cache",
+      "kind": "package-cache",
+      "tool": "npm",
+      "path": "C:\\Users\\maxbarrass\\AppData\\Local\\npm-cache",
+      "enabled": true
+    },
+    {
+      "id": "npm-npx-cache",
+      "kind": "package-cache-child-root",
+      "tool": "npm",
+      "path": "C:\\Users\\maxbarrass\\AppData\\Local\\npm-cache\\_npx",
+      "includeNamePatterns": [
+        "*"
+      ],
+      "minimumInactiveMinutes": 10080,
+      "enabled": true
+    },
+    {
+      "id": "pip-cache",
+      "kind": "package-cache",
+      "tool": "pip",
+      "path": "C:\\Users\\maxbarrass\\AppData\\Local\\pip\\cache",
+      "enabled": true
+    }
+  ]
+}
