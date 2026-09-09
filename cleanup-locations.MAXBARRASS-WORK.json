@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "computerName": "MAXBARRASS-WORK",
-  "description": "MAXBARRASS-WORK: verified package caches and explicitly named Cargo build directories. Nested .tmp build caches require one day of inactivity; other directory locations retain their configured thresholds. Whole worktrees, evidence, recovery data, WSL and Docker disks are excluded. computerName is descriptive.",
+  "description": "MAXBARRASS-WORK: verified package caches and named generated build directories, including ignored build outputs inside registered .tmp worktrees. Nested .tmp caches require one day of inactivity; other directory locations retain their thresholds. Whole worktrees, evidence, recovery data, WSL and Docker disks are excluded. computerName is descriptive.",
   "worktreeLeaseFile": "cleanup-worktree-leases.json",
   "locations": [
     {
@@ -175,6 +175,44 @@
       "repository": "D:\\projects\\governance-foundation\\ontograph",
       "minimumInactiveMinutes": 1440,
       "includeNamePatterns": [
+        "target"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "ontograph-tmp-context-worktree-builds",
+      "kind": "git-worktree-artifacts",
+      "path": "D:\\projects\\governance-foundation\\ontograph\\.tmp",
+      "repository": "D:\\projects\\governance-foundation\\ontograph",
+      "minimumInactiveMinutes": 1440,
+      "artifactRelativePaths": [
+        ".tmp\\target-context"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "ontograph-tmp-viz-worktree-builds",
+      "kind": "git-worktree-artifacts",
+      "path": "D:\\projects\\governance-foundation\\ontograph\\.tmp\\viz-parity",
+      "repository": "D:\\projects\\governance-foundation\\ontograph",
+      "minimumInactiveMinutes": 1440,
+      "artifactRelativePaths": [
+        ".tmp\\p8-target"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "ontograph-tmp-nested-worktree-builds",
+      "kind": "git-worktree-artifacts",
+      "path": "D:\\projects\\governance-foundation\\ontograph\\.tmp\\worktrees",
+      "repository": "D:\\projects\\governance-foundation\\ontograph",
+      "minimumInactiveMinutes": 1440,
+      "artifactRelativePaths": [
+        ".tmp\\cp6\\cargo-target",
+        ".tmp\\probe-cpu-diagnostic-v1\\target",
+        ".tmp\\probe-phase-diagnostic-v2\\target",
+        ".tmp\\target",
+        ".tmp\\target-llvm",
         "target"
       ],
       "enabled": true

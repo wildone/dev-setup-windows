@@ -600,7 +600,10 @@ The original `cleanup-locations.json` remains available for the other PCs. The
 Cargo locations select explicit build-directory names under named roots,
 including nested `.tmp` caches such as `conformance-c0\cargo-target` and
 `conformance-c6\windows-target`. Their sibling evidence and source worktrees
-are retained. Cargo layout validation still applies. Nested `.tmp` cache
+are retained. Registered worktrees also have explicit ignored build-output paths
+listed (for example `.tmp\target-llvm`); their source and Git metadata remain.
+Cargo layout validation applies to Cargo-root entries; worktree-artifact entries
+verify Git-ignore status, tracked-file absence and worktree activity safeguards. Nested `.tmp` cache
 locations require one day of inactivity; other directory locations retain
 seven days. Native package-cache pruning follows each package manager's own
 rules instead of these age thresholds. Cache inventory is not an estimate
