@@ -583,3 +583,25 @@ Restored runners may immediately accept queued jobs and create images, build cac
 - It does not guarantee that host VHDX size will exactly equal ext4 used bytes.
 - It does not make `-DockerPrune` affect Docker engines running inside custom WSL runners.
 - It does not make forced interruption safe for workflows without retry or recovery behavior.
+
+### MAXBARRASS-WORK configuration
+
+The checked-in `cleanup-locations.json` targets this PC's `D:\projects` layout
+and verified pnpm (`D:\.pnpm-store\v10`), npm and pip cache paths. Run the
+list-only command above from this checkout before every cleanup. The
+`computerName` field is descriptive metadata, not an enforced machine lock.
+
+Cargo locations select only `target`, `target-*`, `c2-target`, `c2-target-*`,
+or `issue-*` children under explicitly named roots. Cargo layout validation
+still applies. Directory cleanup requires seven days of inactivity; native
+package-cache pruning follows each package manager's own rules instead of
+this age threshold. Cache inventory is not an estimate of native-prune savings.
+
+Whole worktrees, retained evidence, recovery folders, WSL disks and Docker
+volumes are outside this configuration. The September 2026 script review found
+that whole-worktree removal, `cargo-target`, and `ignored-artifact-tree` modes
+do not repeat all preflight safety checks immediately before deletion. This
+configuration uses `cargo-target-root` instead of those single-tree modes.
+Process detection also relies on command-line path references and does not
+prove that no worker is using a directory. Cleanup needs an idle window;
+a successful preview alone does not establish exclusive ownership.
