@@ -76,6 +76,84 @@ Choose a different minimum age or inspect every proposed removal:
 | `-ListOnly` | Off | Report candidate counts and estimated reclaimable bytes without deleting anything. |
 | `-WhatIf` | Off | Use PowerShell's standard per-item removal preview. |
 
+## Configured project cleanup
+
+[`cleanup-locations.json`](./cleanup-locations.json) is an explicit, versioned
+allow-list for project-generated files and Git worktree collections. Running it
+without `-Execute` is always a read-only preflight:
+
+```powershell
+.\cleanup-temp.ps1 -ConfigPath .\cleanup-locations.json -ListOnly
+```
+
+Artifact trees must be ignored and untracked by their configured repository.
+They are staged by an atomic same-volume rename before deletion. The configured
+Cargo target uses `cargo clean --target-dir` instead, after checking its idle
+period and Cargo/Rust process references. Worktree roots are never recursively
+removed: every direct child must be registered with Git, then Git removes the
+individual worktrees and prunes its metadata. The configured repository's
+primary worktree is always excluded, even when it is itself a direct child of
+the configured root.
+
+A `cargo-target-root` entry covers external build-storage roots without treating
+the whole root as disposable. It requires explicit direct-child name patterns,
+recognizes Cargo's `CACHEDIR.TAG` signature or Rust metadata plus a fingerprint
+directory, and protects recent, process-referenced, reparse-containing, or
+incompletely scanned targets. Eligible children are cleaned individually with
+`cargo clean --target-dir`; the configured root itself is retained.
+
+An `ignored-artifact-root` entry retains the root itself and requires explicit
+`includeNamePatterns` for direct-child directory names. Recent,
+process-referenced, unreadable, reparse-containing, or unmatched children are
+protected; each eligible child is rechecked, staged, and removed separately.
+This allows a large temporary root to retain release evidence and an external
+junction while reclaiming specifically allow-listed build targets.
+
+`package-cache` entries verify their exact configured path against pnpm, npm,
+or pip before invoking that tool's native cache cleanup. `pnpm-store-root`
+protects the active pnpm store reported by pnpm and can remove only inactive
+older sibling store versions. Package-manager processes or cache-path
+references block both modes.
+
+`package-cache-child-root` handles disposable direct-child directories that a
+package manager's native cleanup leaves behind. The configured root must be a
+direct child of the path reported by that package manager; explicit name
+patterns, age, process, reparse-point, and complete-scan checks still apply.
+The supplied configuration uses this for npm's `_npx` execution cache.
+
+`git-worktree-artifacts` entries clean only explicit relative directories such
+as `node_modules` inside registered worktrees. The worktree may have source
+changes, but the artifact must be Git-ignored and contain no tracked files.
+Recent worktrees or artifacts, locks, leases, markers, processes, root reparse
+points, and scan failures retain the dependency directory.
+
+A shared worktree root can be listed once per owning repository. This lets the
+same age, clean-state, remote-reachability, and activity safeguards cover mixed
+Core, Broker, Service Admin, Node, and Java worktrees without treating another
+repository's registered worktrees as disposable folders.
+
+The preflight retains unregistered children and protects registered worktrees
+with a Git lock, active-worktree marker, unexpired agent lease, or matching
+process command line. Every configured entry also has a
+`minimumInactiveMinutes` grace period; every supplied worktree root uses 1,440
+minutes (24 hours). Dirty or recently created/modified worktrees are always
+protected. A clean worktree is eligible only when its exact `HEAD` is reachable
+from at least one remote-tracking ref, proving that its commit was pushed or
+merged remotely. To make agent ownership explicit, an agent can place
+`.cleanup-active.json` or `.codex-active.json` in its worktree, or register an unexpired entry in the ignored local
+`cleanup-worktree-leases.json`; see
+[`cleanup-worktree-leases.example.json`](./cleanup-worktree-leases.example.json).
+
+After reviewing a clean preflight, removal requires both explicit switches:
+
+```powershell
+.\cleanup-temp.ps1 -ConfigPath .\cleanup-locations.json -Execute -Force -WhatIf
+.\cleanup-temp.ps1 -ConfigPath .\cleanup-locations.json -Execute -Force
+```
+
+`-Force` never overrides dirty, unpushed, recent, active, leased, locked, or
+process-referenced worktree protection.
+
 ## WSL storage maintenance
 
 WSL 2 stores each Linux filesystem in a dynamically expanding VHDX file. Deleting data inside Linux makes filesystem blocks free, but it does not necessarily reduce the Windows host file immediately.

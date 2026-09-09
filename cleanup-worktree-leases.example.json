@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "leases": [
+    {
+      "worktree": "C:\\projects\\example\\repo-worktrees\\issue-123",
+      "owner": "agent/session identifier",
+      "heartbeatUtc": "2026-08-21T00:00:00Z",
+      "expiresUtc": "2026-08-21T00:20:00Z"
+    }
+  ]
+}

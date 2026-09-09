@@ -6,3 +6,4 @@ _install/
 **/site-packages/
 **/__pycache__/
 wsl-analysis-*.txt
+cleanup-worktree-leases.json
