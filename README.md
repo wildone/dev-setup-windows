@@ -597,11 +597,14 @@ machine-specific preview below from this checkout before every cleanup.
 The original `cleanup-locations.json` remains available for the other PCs. The
 `computerName` field is descriptive metadata, not an enforced machine lock.
 
-Cargo locations select only `target`, `target-*`, `c2-target`, `c2-target-*`,
-or `issue-*` children under explicitly named roots. Cargo layout validation
-still applies. Directory cleanup requires seven days of inactivity; native
-package-cache pruning follows each package manager's own rules instead of
-this age threshold. Cache inventory is not an estimate of native-prune savings.
+Cargo locations select explicit build-directory names under named roots,
+including nested `.tmp` caches such as `conformance-c0\cargo-target` and
+`conformance-c6\windows-target`. Their sibling evidence and source worktrees
+are retained. Cargo layout validation still applies. Nested `.tmp` cache
+locations require one day of inactivity; other directory locations retain
+seven days. Native package-cache pruning follows each package manager's own
+rules instead of these age thresholds. Cache inventory is not an estimate
+of native-prune savings.
 
 Whole worktrees, retained evidence, recovery folders, WSL disks and Docker
 volumes are outside this configuration. The September 2026 script review found
