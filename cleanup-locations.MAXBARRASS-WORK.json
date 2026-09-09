@@ -1,0 +1,221 @@
+{
+  "schemaVersion": 1,
+  "computerName": "MAXBARRASS-WORK",
+  "description": "MAXBARRASS-WORK: verified package caches and named generated build directories, including ignored build outputs inside registered .tmp worktrees. Nested .tmp caches require one day of inactivity; other directory locations retain their thresholds. Whole worktrees, evidence, recovery data, WSL and Docker disks are excluded. computerName is descriptive.",
+  "worktreeLeaseFile": "cleanup-worktree-leases.json",
+  "locations": [
+    {
+      "id": "ontograph-primary-cargo",
+      "kind": "cargo-target-root",
+      "path": "D:\\projects\\governance-foundation\\ontograph",
+      "repository": "D:\\projects\\governance-foundation\\ontograph",
+      "minimumInactiveMinutes": 10080,
+      "includeNamePatterns": [
+        "target"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "ontograph-temp-cargo",
+      "kind": "cargo-target-root",
+      "path": "D:\\projects\\governance-foundation\\ontograph\\.tmp",
+      "repository": "D:\\projects\\governance-foundation\\ontograph",
+      "minimumInactiveMinutes": 10080,
+      "includeNamePatterns": [
+        "target-*",
+        "c2-target",
+        "c2-target-*"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "ontograph-external-cargo",
+      "kind": "cargo-target-root",
+      "path": "D:\\projects\\ontograph-cargo-target",
+      "repository": "D:\\projects\\governance-foundation\\ontograph",
+      "minimumInactiveMinutes": 10080,
+      "includeNamePatterns": [
+        "issue-*"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "ontograph-external-cargo-targets",
+      "kind": "cargo-target-root",
+      "path": "D:\\projects\\ontograph-cargo-targets",
+      "repository": "D:\\projects\\governance-foundation\\ontograph",
+      "minimumInactiveMinutes": 10080,
+      "includeNamePatterns": [
+        "issue-*"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "pnpm-active-store",
+      "kind": "package-cache",
+      "tool": "pnpm",
+      "path": "D:\\.pnpm-store\\v10",
+      "enabled": true
+    },
+    {
+      "id": "pnpm-obsolete-stores",
+      "kind": "pnpm-store-root",
+      "tool": "pnpm",
+      "path": "D:\\.pnpm-store",
+      "minimumInactiveMinutes": 10080,
+      "enabled": true
+    },
+    {
+      "id": "npm-cache",
+      "kind": "package-cache",
+      "tool": "npm",
+      "path": "C:\\Users\\maxbarrass\\AppData\\Local\\npm-cache",
+      "enabled": true
+    },
+    {
+      "id": "npm-npx-cache",
+      "kind": "package-cache-child-root",
+      "tool": "npm",
+      "path": "C:\\Users\\maxbarrass\\AppData\\Local\\npm-cache\\_npx",
+      "includeNamePatterns": [
+        "*"
+      ],
+      "minimumInactiveMinutes": 10080,
+      "enabled": true
+    },
+    {
+      "id": "pip-cache",
+      "kind": "package-cache",
+      "tool": "pip",
+      "path": "C:\\Users\\maxbarrass\\AppData\\Local\\pip\\cache",
+      "enabled": true
+    },
+    {
+      "id": "ontograph-tmp-2294-independent-review-cargo",
+      "kind": "cargo-target-root",
+      "path": "D:\\projects\\governance-foundation\\ontograph\\.tmp\\2294-independent-review",
+      "repository": "D:\\projects\\governance-foundation\\ontograph",
+      "minimumInactiveMinutes": 1440,
+      "includeNamePatterns": [
+        "target"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "ontograph-tmp-conformance-c0-cargo",
+      "kind": "cargo-target-root",
+      "path": "D:\\projects\\governance-foundation\\ontograph\\.tmp\\conformance-c0",
+      "repository": "D:\\projects\\governance-foundation\\ontograph",
+      "minimumInactiveMinutes": 1440,
+      "includeNamePatterns": [
+        "cargo-target"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "ontograph-tmp-conformance-c4-cargo",
+      "kind": "cargo-target-root",
+      "path": "D:\\projects\\governance-foundation\\ontograph\\.tmp\\conformance-c4",
+      "repository": "D:\\projects\\governance-foundation\\ontograph",
+      "minimumInactiveMinutes": 1440,
+      "includeNamePatterns": [
+        "windows-calendar-target"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "ontograph-tmp-conformance-c6-cargo",
+      "kind": "cargo-target-root",
+      "path": "D:\\projects\\governance-foundation\\ontograph\\.tmp\\conformance-c6",
+      "repository": "D:\\projects\\governance-foundation\\ontograph",
+      "minimumInactiveMinutes": 1440,
+      "includeNamePatterns": [
+        "windows-target",
+        "windows-orchestration-check-target"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "ontograph-tmp-giancarlo-review-cargo",
+      "kind": "cargo-target-root",
+      "path": "D:\\projects\\governance-foundation\\ontograph\\.tmp\\giancarlo-review",
+      "repository": "D:\\projects\\governance-foundation\\ontograph",
+      "minimumInactiveMinutes": 1440,
+      "includeNamePatterns": [
+        "cargo-target"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "ontograph-tmp-hfc-f04-evidence-cargo",
+      "kind": "cargo-target-root",
+      "path": "D:\\projects\\governance-foundation\\ontograph\\.tmp\\hfc-f04-evidence",
+      "repository": "D:\\projects\\governance-foundation\\ontograph",
+      "minimumInactiveMinutes": 1440,
+      "includeNamePatterns": [
+        "target"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "ontograph-tmp-hfc-f04-finalproof-cargo",
+      "kind": "cargo-target-root",
+      "path": "D:\\projects\\governance-foundation\\ontograph\\.tmp\\hfc-f04-finalproof",
+      "repository": "D:\\projects\\governance-foundation\\ontograph",
+      "minimumInactiveMinutes": 1440,
+      "includeNamePatterns": [
+        "target"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "ontograph-tmp-rdf-string-repair-cargo",
+      "kind": "cargo-target-root",
+      "path": "D:\\projects\\governance-foundation\\ontograph\\.tmp\\rdf-string-repair",
+      "repository": "D:\\projects\\governance-foundation\\ontograph",
+      "minimumInactiveMinutes": 1440,
+      "includeNamePatterns": [
+        "target"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "ontograph-tmp-context-worktree-builds",
+      "kind": "git-worktree-artifacts",
+      "path": "D:\\projects\\governance-foundation\\ontograph\\.tmp",
+      "repository": "D:\\projects\\governance-foundation\\ontograph",
+      "minimumInactiveMinutes": 1440,
+      "artifactRelativePaths": [
+        ".tmp\\target-context"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "ontograph-tmp-viz-worktree-builds",
+      "kind": "git-worktree-artifacts",
+      "path": "D:\\projects\\governance-foundation\\ontograph\\.tmp\\viz-parity",
+      "repository": "D:\\projects\\governance-foundation\\ontograph",
+      "minimumInactiveMinutes": 1440,
+      "artifactRelativePaths": [
+        ".tmp\\p8-target"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "ontograph-tmp-nested-worktree-builds",
+      "kind": "git-worktree-artifacts",
+      "path": "D:\\projects\\governance-foundation\\ontograph\\.tmp\\worktrees",
+      "repository": "D:\\projects\\governance-foundation\\ontograph",
+      "minimumInactiveMinutes": 1440,
+      "artifactRelativePaths": [
+        ".tmp\\cp6\\cargo-target",
+        ".tmp\\probe-cpu-diagnostic-v1\\target",
+        ".tmp\\probe-phase-diagnostic-v2\\target",
+        ".tmp\\target",
+        ".tmp\\target-llvm",
+        "target"
+      ],
+      "enabled": true
+    }
+  ]
+}

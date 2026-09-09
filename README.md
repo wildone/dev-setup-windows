@@ -583,3 +583,37 @@ Restored runners may immediately accept queued jobs and create images, build cac
 - It does not guarantee that host VHDX size will exactly equal ext4 used bytes.
 - It does not make `-DockerPrune` affect Docker engines running inside custom WSL runners.
 - It does not make forced interruption safe for workflows without retry or recovery behavior.
+
+### MAXBARRASS-WORK configuration
+
+The separate `cleanup-locations.MAXBARRASS-WORK.json` targets this PC's `D:\projects` layout
+and verified pnpm (`D:\.pnpm-store\v10`), npm and pip cache paths. Run the
+machine-specific preview below from this checkout before every cleanup.
+
+```powershell
+.\cleanup-temp.ps1 -ConfigPath .\cleanup-locations.MAXBARRASS-WORK.json -ListOnly
+```
+
+The original `cleanup-locations.json` remains available for the other PCs. The
+`computerName` field is descriptive metadata, not an enforced machine lock.
+
+Cargo locations select explicit build-directory names under named roots,
+including nested `.tmp` caches such as `conformance-c0\cargo-target` and
+`conformance-c6\windows-target`. Their sibling evidence and source worktrees
+are retained. Registered worktrees also have explicit ignored build-output paths
+listed (for example `.tmp\target-llvm`); their source and Git metadata remain.
+Cargo layout validation applies to Cargo-root entries; worktree-artifact entries
+verify Git-ignore status, tracked-file absence and worktree activity safeguards. Nested `.tmp` cache
+locations require one day of inactivity; other directory locations retain
+seven days. Native package-cache pruning follows each package manager's own
+rules instead of these age thresholds. Cache inventory is not an estimate
+of native-prune savings.
+
+Whole worktrees, retained evidence, recovery folders, WSL disks and Docker
+volumes are outside this configuration. The September 2026 script review found
+that whole-worktree removal, `cargo-target`, and `ignored-artifact-tree` modes
+do not repeat all preflight safety checks immediately before deletion. This
+configuration uses `cargo-target-root` instead of those single-tree modes.
+Process detection also relies on command-line path references and does not
+prove that no worker is using a directory. Cleanup needs an idle window;
+a successful preview alone does not establish exclusive ownership.
