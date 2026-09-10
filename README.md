@@ -97,10 +97,12 @@ the configured root.
 
 A `cargo-target-root` entry covers external build-storage roots without treating
 the whole root as disposable. It requires explicit direct-child name patterns,
-recognizes Cargo's `CACHEDIR.TAG` signature or Rust metadata plus a fingerprint
-directory, and protects recent, process-referenced, reparse-containing, or
+requires Cargo's `CACHEDIR.TAG` signature at the start of the file,
+and protects recent, process-referenced, reparse-containing, or
 incompletely scanned targets. Eligible children are cleaned individually with
 `cargo clean --target-dir`; the configured root itself is retained.
+Missing or invalid cache tags are reported and skipped so other locations can
+continue. Rust metadata and fingerprint directories alone do not qualify a target.
 
 An `ignored-artifact-root` entry retains the root itself and requires explicit
 `includeNamePatterns` for direct-child directory names. Recent,

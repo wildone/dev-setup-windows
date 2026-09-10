@@ -266,23 +266,25 @@ function Test-CargoTargetDirectory {
     $cacheTagPath = Join-Path $Path 'CACHEDIR.TAG'
     if (Test-Path -LiteralPath $cacheTagPath -PathType Leaf) {
         try {
-            $cacheTag = Get-Content -LiteralPath $cacheTagPath -Raw -ErrorAction Stop
-            if ($cacheTag -match '(?m)^Signature: 8a477f597d28d172789f06886806bc55\s*$') {
+            $tagItem = Get-Item -LiteralPath $cacheTagPath -Force -ErrorAction Stop
+            if (Test-ReparsePoint -Item $tagItem) { return $false }
+            # Cargo requires this signature at byte zero; legacy build layout
+            # alone is not enough to authorize cleaning a directory.
+            $signature = [System.Text.Encoding]::ASCII.GetBytes('Signature: 8a477f597d28d172789f06886806bc55')
+            $stream = [System.IO.File]::OpenRead($cacheTagPath)
+            try {
+                foreach ($expected in $signature) {
+                    if ($stream.ReadByte() -ne $expected) { return $false }
+                }
                 return $true
+            } finally {
+                $stream.Dispose()
             }
         } catch {
             return $false
         }
     }
 
-    if (-not (Test-Path -LiteralPath (Join-Path $Path '.rustc_info.json') -PathType Leaf)) {
-        return $false
-    }
-    foreach ($profile in @('debug', 'release')) {
-        if (Test-Path -LiteralPath (Join-Path $Path "$profile\.fingerprint") -PathType Container) {
-            return $true
-        }
-    }
     return $false
 }
 
@@ -853,6 +855,7 @@ function Invoke-ConfiguredCleanup {
                         continue
                     }
                     if (-not (Test-CargoTargetDirectory -Path $cargoTarget.FullName)) {
+                        Write-Warning "Cargo target retained: missing, invalid, or unreadable CACHEDIR.TAG: $($cargoTarget.FullName)"
                         $plan.InvalidCargoTargetCount++
                         continue
                     }
