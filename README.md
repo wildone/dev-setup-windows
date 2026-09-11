@@ -44,6 +44,70 @@ Then:
 | [`wsl-runner-status.ps1`](./wsl-runner-status.ps1) | Determines whether custom WSL GitHub Actions runners are idle, busy, offline, or unsafe to inspect. | No |
 | [`wsl-compact.ps1`](./wsl-compact.ps1) | Trims and compacts custom runner VHDXs, or all discovered WSL/Docker VHDXs when no custom runners exist or `-All` is requested. | Yes |
 
+## Disk cleanup command reference
+
+Run these commands from PowerShell 7 in this repository. Folder cleanup can run
+as your normal user; WSL compaction requires **Run as administrator**.
+
+```powershell
+Set-Location D:\projects\wildone\dev-setup-windows
+
+# Select this PC's configuration; review its paths before running on another PC.
+$cleanupConfig = ".\cleanup-locations.$env:COMPUTERNAME.json"
+if (-not (Test-Path -LiteralPath $cleanupConfig -PathType Leaf)) {
+    throw "Create and review $cleanupConfig for this PC first."
+}
+
+# Preview configured project build folders and package caches.
+.\cleanup-temp.ps1 -ConfigPath $cleanupConfig -ListOnly
+
+# Clean eligible configured folders after reviewing the preview.
+.\cleanup-temp.ps1 -ConfigPath $cleanupConfig -Execute -Force
+
+# Separately preview and clean user Temp files older than seven days.
+.\cleanup-temp.ps1 -OlderThanDays 7 -ListOnly
+.\cleanup-temp.ps1 -OlderThanDays 7
+```
+
+The shared `cleanup-locations.json` is not overwritten by this workflow.
+Configured cleanup retains protected or active paths. Cargo-root targets with
+missing or invalid `CACHEDIR.TAG` are reported and skipped; do not create a tag
+to bypass that protection. Rerunning cleanup does not undo earlier removals.
+
+### WSL and Docker compaction
+
+In an **administrator PowerShell 7** terminal, preview all discovered disks and
+then compact them without pruning Docker objects:
+
+```powershell
+.\wsl-compact.ps1 -All -DockerPrune None -ListOnly
+.\wsl-compact.ps1 -All -DockerPrune None -ThrottleLimit 1
+```
+
+`-All` temporarily stops Docker Desktop and every WSL distribution. Review the
+preview and use an idle maintenance window. It is not a C:-only selector and
+can include disks on D:. Do not run concurrent compaction commands. For custom
+runner readiness checks and runner-safe mode, see [wsl-compact.ps1](#wsl-compactps1).
+Compaction returns unused virtual-disk blocks to Windows; it does not itself
+remove container data, images, build caches, or recovery archives.
+
+### C:-only compaction on MAXBARRASS-WORK
+
+This existing checkout also has a local helper and disk plan prepared for this
+PC. In an **administrator PowerShell 7** terminal:
+
+```powershell
+.\reports\c-drive-wsl-maintenance-20260910.ps1
+```
+
+The helper uses `reports\c-drive-wsl-plan-20260910.json` to compact the four
+selected C: disks (Ubuntu, Arch, Docker system, and Docker data). It temporarily
+stops all WSL distributions and Docker, then restores previously running
+distributions and Docker. It does not compact D: disks or prune Docker data.
+Both files are local, ignored maintenance artifacts: they are **not included in
+a fresh clone** and must not be copied to another PC without reviewing its disk
+paths. Review the plan again if distributions have moved or been recreated.
+
 ## User temp cleanup
 
 `cleanup-temp.ps1` cleans only the current user's `%LOCALAPPDATA%\Temp`
@@ -594,6 +658,7 @@ machine-specific preview below from this checkout before every cleanup.
 
 ```powershell
 .\cleanup-temp.ps1 -ConfigPath .\cleanup-locations.MAXBARRASS-WORK.json -ListOnly
+.\cleanup-temp.ps1 -ConfigPath .\cleanup-locations.MAXBARRASS-WORK.json -Execute -Force
 ```
 
 The original `cleanup-locations.json` remains available for the other PCs. The
